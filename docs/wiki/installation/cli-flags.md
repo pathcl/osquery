@@ -6,7 +6,7 @@ control startup settings may be included as "options" to the daemon within its [
 
 ## CLI-only (initialization) flags
 
-A special flag, part of Gflags, can be used to read additional flags from a line-delimited file. On OS X and Linux this "flagfile" is the recommended way to add/remove the following CLI-only initialization flags.
+A special flag, part of Gflags, can be used to read additional flags from a line-delimited file. On OS X and Linux this **flagfile** is the recommended way to add/remove the following CLI-only initialization flags.
 
 `--flagfile="/etc/osquery/osquery.flags"`
 
@@ -32,8 +32,7 @@ Built-in options include: **filesystem**, **tls**
 
 The **filesystem** config plugin's path to a JSON file.
 On OS X the default path is **/var/osquery/osquery.conf**.
-If you want to read from multiple configuration paths create a directory: **/etc/osquery/osquery.conf.d/**.
-All files within that optional directory will be read and merged in lexical order.
+If you want to read from multiple configuration paths create a directory: **/etc/osquery/osquery.conf.d/**. All files within that optional directory will be read and merged in lexical order.
 
 `--config_check=false`
 
@@ -43,40 +42,30 @@ Check the format of an osquery config and exit. Arbitrary config plugins may be 
 
 `--force=false`
 
-Force osqueryd to kill previously-running daemons. The daemon will check for an existing "pidfile". If found, and if it contains a pid of a process named "osqueryd", the process will be killed.
+Force **osqueryd** to kill previously-running daemons. The daemon will check for an existing "pidfile". If found, and if it contains a pid of a process named "osqueryd", the process will be killed.
 
 `--pidfile=/var/osquery/osqueryd.pidfile`
 
-Path to the daemon pidfile mutex.
-The file is used to prevent multiple osqueryd processes starting.
+Path to the daemon pidfile mutex. The file is used to prevent multiple osqueryd processes starting.
 
 `--disable_watchdog=false`
 
-Disable userland watchdog process.
-osqueryd uses a watchdog process to monitor the memory and CPU utilization
-of threads executing the query schedule. If any performance limit is violated
-the "worker" process will be restarted.
+Disable userland watchdog process. **osqueryd** uses a watchdog process to monitor the memory and CPU utilization of threads executing the query schedule. If any performance limit is violated the "worker" process will be restarted.
 
 `--watchdog_level=1`
 
 Performance limit level (0=loose, 1=normal, 2=restrictive, 3=debug). The default watchdog process uses a "level" to configure performance limits.
-The higher the level the more strict the limits become.
+The higher the level the more strict the limits become. The "debug" level disables the performance limits completely.
 
 ### Backing storage control flags
 
 `--database_in_memory=false`
 
-Keep osquery backing-store in memory.
-This has a number of performance implications and is not recommended.
-For the default backing-store, RocksDB, this option is not supported.
+Keep osquery backing-store in memory. This has a number of performance implications and is not recommended. For the default backing-store, RocksDB, this option is not supported.
 
 `--database_path=/var/osquery/osquery.db`
 
-If using a disk-based backing store, specify a path.
-osquery will keep state using a "backing store" using RocksDB by default.
-This state holds event information such that it may be queried later according
-to a schedule. It holds the results of the most recent query for each query within
-the schedule. This last-queried result allows query-differential logging.
+If using a disk-based backing store, specify a path. osquery will keep state using a "backing store" using RocksDB by default. This state holds event information such that it may be queried later according to a schedule. It holds the results of the most recent query for each query within the schedule. This last-queried result allows query-differential logging.
 
 ### Extensions control flags
 
@@ -208,6 +197,17 @@ Osquery will natively re-run the discovery queries from time to time, to make
 sure that all of the correct packs are executing. This flag allows you to
 specify that interval.
 
+`--pack_delimiter=_`
+
+Control the delimiter between pack name and pack query names. When queries are added to the daemon's schedule they inherit the name of the pack. A query named "info" within the "general_info" pack will become "pack_general_info_info". Changing the delimiter to "/" turned the scheduled name into: "pack/general_info/info".
+
+`--disable_caching=false`
+
+"Caching" refers to short cutting the table implementation and returning the same results from the previous query against the table.
+This is not related to differential results from scheduled queries, but does affect the performance of the schedule.
+Results are cached when different scheduled queries in a schedule use the same table, without providing query constraints.
+Caching should NOT affect data freshness since the cache life is determined as the minimum interval of all queries against a table.
+
 `--schedule_default_interval=3600`
 
 Optionally set the default interval value. This is used if you schedule a query
@@ -273,6 +273,12 @@ Enable verbose informational messages.
 
 Directory path for ERROR/WARN/INFO and results logging.
 
+`--logger_mode=640`
+
+File mode for output log files (provided as an octal string).  Note that this
+affects both the query result log and the status logs.
+**Warning**: If run as root, log files may contain sensitive information!
+
 `--value_max=512`
 
 Maximum returned row value size.
@@ -281,11 +287,11 @@ Maximum returned row value size.
 
 `--distributed_plugin=tls`
 
-Distributed plugin name. The default distributed plugin is not set. You must set `--distributed_enabled=true --distributed_plugin=tls` (or whatever plugin you'd rather use instead of TLS) to use the distributed feature.
+Distributed plugin name. The default distributed plugin is not set. You must set `--disable_distributed=false --distributed_plugin=tls` (or whatever plugin you'd rather use instead of TLS) to enable the distributed feature.
 
 `--disable_distributed=true`
 
-Main killswitch for distributed queries functionality. By default, this is turned off.
+Disable distributed queries functionality. By default, this is set to `true` (the distributed feature is disabled). Set this to `false` to enable distributed queries.
 
 `--distributed_interval=60`
 

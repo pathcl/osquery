@@ -428,6 +428,33 @@ class TimeoutRunner(object):
         self.stdout, self.stderr = self.proc.communicate()
         timer.cancel()
 
+<<<<<<< HEAD
+=======
+def flaky(gen):
+    exceptions = []
+    def attempt(this):
+        try:
+            worked = gen(this)
+            return True
+        except Exception as e:
+            exc_type, exc_obj, exc_tb = sys.exc_info()
+            fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
+            exceptions.append((e, fname, exc_tb.tb_lineno))
+        return False
+    def wrapper(this):
+        for i in range(3):
+            if attempt(this):
+                return True
+        i = 1
+        for exc in exceptions:
+            print("Test (attempt %d) %s::%s failed: %s (%s:%d)" % (
+                i,
+                this.__class__.__name__,
+                gen.__name__,  str(exc[0]), exc[1], exc[2]))
+            i += 1
+        raise exceptions[0][0]
+    return wrapper
+>>>>>>> 769a723b5ccb97037b678a874480f37beb2281c6
 
 class Tester(object):
 

@@ -8,19 +8,11 @@
  *
  */
 
+#include "osquery/remote/transports/tls.h"
+
 #include <boost/asio/ssl/context_base.hpp>
 
-#ifndef OPENSSL_NO_SSL2
-#define OPENSSL_NO_SSL2 1
-#endif
-
-#define OPENSSL_NO_SSL3 1
-#define OPENSSL_NO_MD5 1
-#define OPENSSL_NO_DEPRECATED 1
-
 #include <osquery/filesystem.h>
-
-#include "osquery/remote/transports/tls.h"
 
 namespace http = boost::network::http;
 
@@ -33,10 +25,15 @@ SSL_CTX* TLSv1_1_server_method(void) { return nullptr; }
 #endif
 #if !defined(HAS_SSL_TXT_TLSV1_2)
 struct CRYPTO_THREADID;
-void ERR_remove_thread_state(const CRYPTO_THREADID *tid) {}
+void ERR_remove_thread_state(const CRYPTO_THREADID* tid) {}
 SSL_CTX* TLSv1_2_client_method(void) { return nullptr; }
 SSL_CTX* TLSv1_2_method(void) { return nullptr; }
 SSL_CTX* TLSv1_2_server_method(void) { return nullptr; }
+#endif
+#if defined(NO_SSL_TXT_SSLV3)
+SSL_METHOD* SSLv3_server_method(void) { return nullptr; }
+SSL_METHOD* SSLv3_client_method(void) { return nullptr; }
+SSL_METHOD* SSLv3_method(void) { return nullptr; }
 #endif
 }
 
@@ -105,7 +102,7 @@ http::client TLSTransport::getClient() {
   options.follow_redirects(true).always_verify_peer(verify_peer_).timeout(4);
 
   std::string ciphers = kTLSCiphers;
-  // Some Ubuntu 12.04 clients exhaust their cipher suites without SHA.
+// Some Ubuntu 12.04 clients exhaust their cipher suites without SHA.
 #if defined(HAS_SSL_TXT_TLSV1_2) && !defined(UBUNTU_PRECISE) && !defined(DARWIN)
   // Otherwise we prefer GCM and SHA256+
   ciphers += ":!CBC:!SHA";

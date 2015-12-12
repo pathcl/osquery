@@ -14,6 +14,7 @@
 #include <boost/algorithm/string/classification.hpp>
 #include <boost/lexical_cast.hpp>
 
+#include <osquery/config.h>
 #include <osquery/core.h>
 #include <osquery/events.h>
 #include <osquery/flags.h>
@@ -34,7 +35,10 @@ FLAG(bool,
      true,
      "Optimize subscriber select queries (scheduler only)");
 
-FLAG(int32, events_expiry, 86000, "Timeout to expire event subscriber results");
+FLAG(uint64,
+     events_expiry,
+     86000,
+     "Timeout to expire event subscriber results");
 
 const std::vector<size_t> kEventTimeLists = {
     1 * 60 * 60, // 1 hour
@@ -48,16 +52,15 @@ void publisherSleep(size_t milli) {
 
 static inline EventTime timeFromRecord(const std::string& record) {
   // Convert a stored index "as string bytes" to a time value.
-  char* end = nullptr;
-  long long int afinite = strtoll(record.c_str(), &end, 10);
-  if (end == nullptr || end == record.c_str() || *end != '\0' ||
-      ((afinite == LLONG_MIN || afinite == LLONG_MAX) && errno == ERANGE)) {
+  long long afinite;
+  if (!safeStrtoll(record, 10, afinite)) {
     return 0;
   }
   return afinite;
 }
 
 QueryData EventSubscriberPlugin::genTable(QueryContext& context) {
+  // Stop is an unsigned (-1), our end of time equivalent.
   EventTime start = 0, stop = -1;
   if (context.constraints["time"].getAll().size() > 0) {
     // Use the 'time' constraint to optimize backing-store lookups.
@@ -87,13 +90,12 @@ QueryData EventSubscriberPlugin::genTable(QueryContext& context) {
 }
 
 void EventPublisherPlugin::fire(const EventContextRef& ec, EventTime time) {
-  EventContextID ec_id;
-
   if (isEnding()) {
     // Cannot emit/fire while ending
     return;
   }
 
+  EventContextID ec_id = 0;
   {
     boost::lock_guard<boost::mutex> lock(ec_id_lock_);
     ec_id = next_ec_id_++;
@@ -106,7 +108,6 @@ void EventPublisherPlugin::fire(const EventContextRef& ec, EventTime time) {
       if (time == 0) {
         time = getUnixTime();
       }
-      // Todo: add a check to assure normalized (seconds) time.
       ec->time = time;
     }
   }
@@ -122,7 +123,7 @@ void EventPublisherPlugin::fire(const EventContextRef& ec, EventTime time) {
 
 std::set<std::string> EventSubscriberPlugin::getIndexes(EventTime start,
                                                         EventTime stop,
-                                                        int list_key) {
+                                                        size_t list_key) {
   auto db = DBHandle::getInstance();
   auto index_key = "indexes." + dbNamespace();
   std::set<std::string> indexes;
@@ -181,7 +182,8 @@ std::set<std::string> EventSubscriberPlugin::getIndexes(EventTime start,
       // Bins are identified by the binning size step.
       auto step = timeFromRecord(bin);
       // Check if size * step -> size * (step + 1) is within a range.
-      int bin_start = size * step, bin_stop = size * (step + 1);
+      size_t bin_start = size * step;
+      size_t bin_stop = size * (step + 1);
       if (expire_events_ && expire_time_ > 0) {
         if (bin_stop <= expire_time_) {
           expirations.push_back(bin);
@@ -306,7 +308,7 @@ std::vector<EventRecord> EventSubscriberPlugin::getRecords(
     }
   }
 
-  return std::move(records);
+  return records;
 }
 
 Status EventSubscriberPlugin::recordEvent(EventID& eid, EventTime time) {
@@ -321,7 +323,7 @@ Status EventSubscriberPlugin::recordEvent(EventID& eid, EventTime time) {
   std::string list_key;
   std::string list_id;
 
-  for (auto time_list : kEventTimeLists) {
+  for (const auto& time_list : kEventTimeLists) {
     // The list_id is the MOST-Specific key ID, the bin for this list.
     // If the event time was 13 and the time_list is 5 seconds, lid = 2.
     list_id = boost::lexical_cast<std::string>(time / time_list);
@@ -356,8 +358,7 @@ Status EventSubscriberPlugin::recordEvent(EventID& eid, EventTime time) {
       status = db->Put(
           kEvents, record_key + "." + list_key + "." + list_id, record_value);
       if (!status.ok()) {
-        LOG(ERROR) << "Could not put Event Record key: " << record_key << "."
-                   << list_key << "." << list_id;
+        LOG(ERROR) << "Could not put Event Record key: " << record_key;
       }
     }
   }
@@ -437,7 +438,7 @@ QueryData EventSubscriberPlugin::get(EventTime start, EventTime stop) {
     // Index retrieval will apply the constraints checking and auto-expire.
     expire_time_ = getUnixTime() - FLAGS_events_expiry;
   }
-  return std::move(results);
+  return results;
 }
 
 Status EventSubscriberPlugin::add(Row& r, EventTime event_time) {
@@ -585,21 +586,49 @@ Status EventFactory::registerEventSubscriber(const PluginRef& sub) {
     return Status(1, "Invalid subscriber");
   }
 
+  // The config may use an "events" key to explicitly enabled or disable
+  // event subscribers. See EventSubscriber::disable.
+  auto name = specialized_sub->getName();
+  auto plugin = Config::getInstance().getParser("events");
+  if (plugin != nullptr && plugin.get() != nullptr) {
+    const auto& data = plugin->getData();
+    // First perform explicit enabling.
+    if (data.get_child("events").count("enable_subscribers") > 0) {
+      for (const auto& item : data.get_child("events.enable_subscribers")) {
+        if (item.second.data() == name) {
+          VLOG(1) << "Enabling event subscriber: " << name;
+          specialized_sub->disabled = false;
+        }
+      }
+    }
+    // Then use explicit disabling as an ultimate override.
+    if (data.get_child("events").count("disable_subscribers") > 0) {
+      for (const auto& item : data.get_child("events.disable_subscribers")) {
+        if (item.second.data() == name) {
+          VLOG(1) << "Disabling event subscriber: " << name;
+          specialized_sub->disabled = true;
+        }
+      }
+    }
+  }
+
   // Let the module initialize any Subscriptions.
   auto status = Status(0, "OK");
-  if (!FLAGS_disable_events) {
+  if (!FLAGS_disable_events && !specialized_sub->disabled) {
     status = specialized_sub->init();
+    specialized_sub->state(SUBSCRIBER_RUNNING);
+  } else {
+    specialized_sub->state(SUBSCRIBER_PAUSED);
   }
 
   auto& ef = EventFactory::getInstance();
-  ef.event_subs_[specialized_sub->getName()] = specialized_sub;
+  ef.event_subs_[name] = specialized_sub;
 
   // Set state of subscriber.
   if (!status.ok()) {
     specialized_sub->state(SUBSCRIBER_FAILED);
     return Status(1, status.getMessage());
   } else {
-    specialized_sub->state(SUBSCRIBER_RUNNING);
     return Status(0, "OK");
   }
 }
@@ -607,9 +636,8 @@ Status EventFactory::registerEventSubscriber(const PluginRef& sub) {
 Status EventFactory::addSubscription(EventPublisherID& type_id,
                                      EventSubscriberID& name_id,
                                      const SubscriptionContextRef& mc,
-                                     EventCallback cb,
-                                     void* user_data) {
-  auto subscription = Subscription::create(name_id, mc, cb, user_data);
+                                     EventCallback cb) {
+  auto subscription = Subscription::create(name_id, mc, cb);
   return EventFactory::addSubscription(type_id, subscription);
 }
 
@@ -621,11 +649,7 @@ Status EventFactory::addSubscription(EventPublisherID& type_id,
   }
 
   // The event factory is responsible for configuring the event types.
-  auto status = publisher->addSubscription(subscription);
-  if (!FLAGS_disable_events) {
-    publisher->configure();
-  }
-  return status;
+  return publisher->addSubscription(subscription);
 }
 
 size_t EventFactory::numSubscriptions(EventPublisherID& type_id) {
@@ -727,6 +751,7 @@ void EventFactory::end(bool join) {
 
   // Threads may still be executing, when they finish, release publishers.
   ef.event_pubs_.clear();
+  ef.event_subs_.clear();
 }
 
 void attachEvents() {
@@ -739,8 +764,15 @@ void attachEvents() {
   for (const auto& subscriber : subscribers) {
     auto status = EventFactory::registerEventSubscriber(subscriber.second);
     if (!status.ok()) {
-      LOG(ERROR) << "Error registering subscriber: " << status.getMessage();
+      LOG(WARNING) << "Error registering subscriber: " << status.getMessage();
     }
+  }
+
+  // Configure the event publishers the first time they load.
+  // Subsequent configuration updates will update the subscribers followed
+  // by the publishers.
+  if (!FLAGS_disable_events) {
+    Registry::registry("event_publisher")->configure();
   }
 }
 }

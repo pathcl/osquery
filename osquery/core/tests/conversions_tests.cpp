@@ -34,7 +34,7 @@ TEST_F(ConversionsTests, test_conversion) {
 TEST_F(ConversionsTests, test_base64) {
   std::string unencoded = "HELLO";
   auto encoded = base64Encode(unencoded);
-  EXPECT_NE(encoded.size(), 0);
+  EXPECT_NE(encoded.size(), 0U);
 
   auto unencoded2 = base64Decode(encoded);
   EXPECT_EQ(unencoded, unencoded2);
@@ -50,5 +50,19 @@ TEST_F(ConversionsTests, test_ascii_false) {
   std::string unencoded = "こんにちは";
   auto result = isPrintable(unencoded);
   EXPECT_FALSE(result);
+}
+
+TEST_F(ConversionsTests, test_unicode_unescape) {
+  std::vector<std::pair<std::string, std::string> > conversions = {
+      std::make_pair("\\u0025hi", "%hi"),
+      std::make_pair("hi\\u0025", "hi%"),
+      std::make_pair("\\uFFFFhi", "\\uFFFFhi"),
+      std::make_pair("0000\\u", "0000\\u"),
+      std::make_pair("hi", "hi"),
+  };
+
+  for (const auto& test : conversions) {
+    EXPECT_EQ(unescapeUnicode(test.first), test.second);
+  }
 }
 }

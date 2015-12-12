@@ -16,6 +16,7 @@
 #include <osquery/flags.h>
 #include <osquery/logger.h>
 
+#include "osquery/core/conversions.h"
 #include "osquery/events/linux/audit.h"
 
 namespace osquery {
@@ -122,13 +123,14 @@ void AuditEventPublisher::configure() {
         // Problem adding rule. If errno == EEXIST then fine.
         VLOG(1) << "Cannot add audit rule: syscall=" << scr.syscall
                 << " filter='" << scr.filter << "': error " << rc;
-      } else {
-        // Add this rule data to the publisher's list of transient rules.
-        // These will be removed during tear down or re-configure.
-        rule.flags = scr.flags;
-        rule.action = scr.action;
-        transient_rules_.push_back(rule);
       }
+
+      // Note: all rules are considered transient if added by subscribers.
+      // Add this rule data to the publisher's list of transient rules.
+      // These will be removed during tear down or re-configure.
+      rule.flags = scr.flags;
+      rule.action = scr.action;
+      transient_rules_.push_back(rule);
     }
   }
 
@@ -169,31 +171,58 @@ inline bool handleAuditReply(const struct audit_reply& reply,
 
   // Tokenize the message.
   auto message = std::string(reply.message, reply.len);
-  std::vector<std::string> fields;
-  boost::split(fields, message, boost::is_any_of(" ="));
-  std::string().swap(message);
+  auto preamble_end = message.find("): ");
+  if (preamble_end == std::string::npos) {
+    return false;
+  } else {
+    ec->preamble = message.substr(0, preamble_end + 1);
+    message = message.substr(preamble_end + 3);
+  }
 
-  // Iterate over each field=value pair.
-  auto field_it = fields.begin();
-  ec->preamble = std::move(*field_it);
-  for (++field_it; field_it != fields.end(); field_it++) {
-    const auto& key = *field_it;
-    if (++field_it == fields.end()) {
-      // A malformed message will have had an odd number of fields=value
-      // pairs, discard the event.
-      return false;
+  // The linear search will construct series of key value pairs.
+  std::string key, value;
+  // There are several ways of representing value data (enclosed strings, etc).
+  bool found_assignment{false}, found_enclose{false};
+  for (const auto& c : message) {
+    // Iterate over each character in the audit message.
+    if ((found_enclose && c == '"') || (!found_enclose && c == ' ')) {
+      if (c == '"') {
+        value += c;
+      }
+      // This is a terminating sequence, the end of an enclosure or space tok.
+      if (!key.empty()) {
+        // Multiple space tokens are supported.
+        ec->fields[key] = value;
+      }
+      found_enclose = false;
+      found_assignment = false;
+      key.clear();
+      value.clear();
+    } else if (!found_assignment && c == ' ') {
+      // A field tokenizer.
+    } else if (found_assignment) {
+      // Enclosure sequences appear immediately following assignment.
+      if (c == '"') {
+        found_enclose = true;
+      }
+      value += c;
+    } else if (c == '=') {
+      found_assignment = true;
+    } else {
+      key += c;
     }
-    // Assign the key/value pair.
-    ec->fields[key] = std::move(*field_it);
+  }
+
+  // Last step, if there was no trailing tokenizer.
+  if (!key.empty()) {
+    ec->fields[key] = value;
   }
 
   // There is a special field for syscalls.
   if (ec->fields.count("syscall") == 1) {
     const auto& syscall_string = ec->fields.at("syscall").c_str();
-    char* end = nullptr;
-    long long int syscall = strtoll(syscall_string, &end, 10);
-    if (end == nullptr || end == syscall_string || *end != '\0' ||
-        ((syscall == LLONG_MIN || syscall == LLONG_MAX) && errno == ERANGE)) {
+    long long syscall{0};
+    if (!safeStrtoll(syscall_string, 10, syscall)) {
       syscall = 0;
     }
     ec->syscall = syscall;
@@ -243,8 +272,11 @@ Status AuditEventPublisher::run() {
           memcpy(&status_, reply_.status, sizeof(struct audit_status));
         }
         break;
+      case AUDIT_FIRST_USER_MSG... AUDIT_LAST_USER_MSG:
+        handle_reply = true;
+        break;
       case (AUDIT_GET + 1)...(AUDIT_LIST_RULES - 1):
-      case (AUDIT_LIST_RULES + 1)... AUDIT_LAST_USER_MSG:
+      case (AUDIT_LIST_RULES + 1)...(AUDIT_FIRST_USER_MSG - 1):
         // Not interested in handling meta-commands and actions.
         break;
       case AUDIT_DAEMON_START... AUDIT_DAEMON_CONFIG: // 1200 - 1203
@@ -280,7 +312,7 @@ Status AuditEventPublisher::run() {
     }
   }
 
-  if (status_.pid != getpid()) {
+  if (static_cast<pid_t>(status_.pid) != getpid()) {
     if (control_ && status_.pid != 0) {
       VLOG(1) << "Audit control lost to pid: " << status_.pid;
       // This process has lost control of audit.
@@ -289,6 +321,7 @@ Status AuditEventPublisher::run() {
     }
 
     if (FLAGS_audit_persist && !FLAGS_disable_audit && !immutable_) {
+      VLOG(1) << "Persisting audit control";
       audit_set_pid(handle_, getpid(), WAIT_NO);
       control_ = true;
     }
@@ -301,6 +334,12 @@ Status AuditEventPublisher::run() {
 
 bool AuditEventPublisher::shouldFire(const AuditSubscriptionContextRef& sc,
                                      const AuditEventContextRef& ec) const {
+  // User messages allow a catch all configuration.
+  if (sc->user_types &&
+      (ec->type >= AUDIT_FIRST_USER_MSG && ec->type <= AUDIT_LAST_USER_MSG)) {
+    return true;
+  }
+
   // If this subscription (with set of rules) explicitly requested the audit
   // reply type.
   for (const auto& type : sc->types) {

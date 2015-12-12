@@ -46,10 +46,32 @@ class OsqueryiTest(unittest.TestCase):
             "--database_path=%s" % (self.dbpath),
             "--config_path=%s/test.config" % test_base.SCRIPT_DIR
         ],
+<<<<<<< HEAD
             SHELL_TIMEOUT)
         self.assertEqual(proc.stdout, "")
         print(proc.stdout)
         print(proc.stderr)
+=======
+            SHELL_TIMEOUT)
+        self.assertEqual(proc.stdout, "")
+        print(proc.stdout)
+        print(proc.stderr)
+        self.assertEqual(proc.proc.poll(), 0)
+
+    def test_config_dump(self):
+        '''Test that config raw output is dumped when requested'''
+        config = "%s/test_noninline_packs.conf" % test_base.SCRIPT_DIR
+        proc = test_base.TimeoutRunner([
+                self.binary,
+                "--config_dump",
+                "--config_path=%s" % config
+            ],
+            SHELL_TIMEOUT)
+        content = ""
+        with open(config, 'r') as fh: content = fh.read()
+        self.assertEqual(proc.stdout, "{\"%s\": %s}\n" % (config, content))
+        print (proc.stderr)
+>>>>>>> 769a723b5ccb97037b678a874480f37beb2281c6
         self.assertEqual(proc.proc.poll(), 0)
 
     def test_config_check_failure(self):
@@ -84,9 +106,26 @@ class OsqueryiTest(unittest.TestCase):
             "--database_path=%s" % (self.dbpath),
             "--config_plugin=does_not_exist"
         ],
+<<<<<<< HEAD
+=======
             SHELL_TIMEOUT)
         self.assertNotEqual(proc.stderr, "")
         self.assertNotEqual(proc.proc.poll(), 0)
+
+    def test_config_check_example(self):
+        '''Test that the example config passes'''
+        example_path = "deployment/osquery.example.conf"
+        proc = test_base.TimeoutRunner([
+                self.binary,
+                "--config_check",
+                "--config_path=%s/../%s" % (test_base.SCRIPT_DIR, example_path)
+            ],
+>>>>>>> 769a723b5ccb97037b678a874480f37beb2281c6
+            SHELL_TIMEOUT)
+        self.assertEqual(proc.stdout, "")
+        print (proc.stdout)
+        print (proc.stderr)
+        self.assertEqual(proc.proc.poll(), 0)
 
     def test_meta_commands(self):
         '''Test the supported meta shell/help/info commands'''

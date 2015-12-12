@@ -18,18 +18,18 @@
 namespace osquery {
 
 #ifdef __APPLE__
-  #import <CommonCrypto/CommonDigest.h>
-  #define __HASH_API(name) CC_##name
+#import <CommonCrypto/CommonDigest.h>
+#define __HASH_API(name) CC_##name
 #else
-  #include <openssl/sha.h>
-  #include <openssl/md5.h>
-  #define __HASH_API(name) name
+#include <openssl/sha.h>
+#include <openssl/md5.h>
+#define __HASH_API(name) name
 
-  #define SHA1_DIGEST_LENGTH SHA_DIGEST_LENGTH
-  #define SHA1_CTX SHA_CTX
+#define SHA1_DIGEST_LENGTH SHA_DIGEST_LENGTH
+#define SHA1_CTX SHA_CTX
 #endif
 
-#define HASH_CHUNK_SIZE 1024
+#define HASH_CHUNK_SIZE 4096
 
 Hash::~Hash() {
   if (ctx_ != nullptr) {
@@ -68,6 +68,7 @@ void Hash::update(const void* buffer, size_t size) {
 std::string Hash::digest() {
   unsigned char hash[length_];
 
+  memset(hash, 0, length_);
   if (algorithm_ == HASH_TYPE_MD5) {
     __HASH_API(MD5_Final)(hash, (__HASH_API(MD5_CTX)*)ctx_);
   } else if (algorithm_ == HASH_TYPE_SHA1) {
@@ -78,42 +79,63 @@ std::string Hash::digest() {
 
   // The hash value is only relevant as a hex digest.
   std::stringstream digest;
-  for (int i = 0; i < length_; i++) {
+  for (size_t i = 0; i < length_; i++) {
     digest << std::hex << std::setw(2) << std::setfill('0') << (int)hash[i];
   }
 
   return digest.str();
 }
 
-std::string hashFromBuffer(HashType hash_type, const void* buffer, size_t size) {
+std::string hashFromBuffer(HashType hash_type,
+                           const void* buffer,
+                           size_t size) {
   Hash hash(hash_type);
   hash.update(buffer, size);
   return hash.digest();
 }
 
+MultiHashes hashMultiFromFile(int mask, const std::string& path) {
+  std::map<HashType, std::shared_ptr<Hash> > hashes = {
+      {HASH_TYPE_MD5, std::make_shared<Hash>(HASH_TYPE_MD5)},
+      {HASH_TYPE_SHA1, std::make_shared<Hash>(HASH_TYPE_SHA1)},
+      {HASH_TYPE_SHA256, std::make_shared<Hash>(HASH_TYPE_SHA256)},
+  };
+
+  readFile(path,
+           0,
+           HASH_CHUNK_SIZE,
+           false,
+           true,
+           ([&hashes, &mask](std::string& buffer, size_t size) {
+             for (auto& hash : hashes) {
+               if (mask & hash.first) {
+                 hash.second->update(&buffer[0], size);
+               }
+             }
+           }));
+
+  MultiHashes mh;
+  mh.mask = mask;
+  if (mask & HASH_TYPE_MD5) {
+    mh.md5 = hashes.at(HASH_TYPE_MD5)->digest();
+  }
+  if (mask & HASH_TYPE_SHA1) {
+    mh.sha1 = hashes.at(HASH_TYPE_SHA1)->digest();
+  }
+  if (mask & HASH_TYPE_SHA256) {
+    mh.sha256 = hashes.at(HASH_TYPE_SHA256)->digest();
+  }
+  return mh;
+}
+
 std::string hashFromFile(HashType hash_type, const std::string& path) {
-  // Perform a dry-run of a file read without filling in any content.
-  auto status = readFile(path);
-  if (!status.ok()) {
-    return "";
+  auto hashes = hashMultiFromFile(hash_type, path);
+  if (hash_type == HASH_TYPE_MD5) {
+    return hashes.md5;
+  } else if (hash_type == HASH_TYPE_SHA1) {
+    return hashes.sha1;
+  } else {
+    return hashes.sha256;
   }
-
-  Hash hash(hash_type);
-  // Use the canonicalized path returned from a successful readFile dry-run.
-  FILE* file = fopen(status.what().c_str(), "rb");
-  if (file == nullptr) {
-    VLOG(1) << "Cannot hash/open file " << path;
-    return "";
-  }
-
-  // Then call updates with read chunks.
-  size_t bytes_read = 0;
-  unsigned char buffer[HASH_CHUNK_SIZE];
-  while ((bytes_read = fread(buffer, 1, HASH_CHUNK_SIZE, file))) {
-    hash.update(buffer, bytes_read);
-  }
-
-  fclose(file);
-  return hash.digest();
 }
 }

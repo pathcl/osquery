@@ -85,10 +85,29 @@ function install_cmake() {
   fi
 }
 
-function install_thrift() {
-  TARBALL=0.9.1.tar.gz
+function install_sleuthkit() {
+  SOURCE=sleuthkit-sleuthkit-4.1.3
+  TARBALL=$SOURCE.tar.gz
   URL=$DEPS_URL/$TARBALL
-  SOURCE=thrift-0.9.1
+
+  if provision sleuthkid /usr/local/lib/libtsk.a; then
+    pushd $SOURCE
+    ./bootstrap
+    ./configure --prefix=/usr/local --without-afflib \
+      --disable-dependency-tracking --disable-java CFLAGS="$CFLAGS"
+    pushd tsk
+    CC="$CC" CXX="$CXX" make -j $THREADS
+    sudo make install
+    popd
+    sudo make install-nobase_includeHEADERS
+    popd
+  fi
+}
+
+function install_thrift() {
+  TARBALL=thrift-0.9.3.tar.gz
+  URL=$DEPS_URL/$TARBALL
+  SOURCE=thrift-0.9.3
 
   if provision thrift /usr/local/lib/libthrift.a; then
     pushd $SOURCE
@@ -160,7 +179,7 @@ function install_cppnetlib() {
   TARBALL=$SOURCE.tar.gz
   URL=$DEPS_URL/$TARBALL
 
-  if provision cppnetlib /usr/local/lib/libcppnetlib-uri.a; then
+  if provision cppnetlib /usr/local/include/boost/network.hpp; then
     pushd $SOURCE
     mkdir -p build
     pushd build
@@ -182,6 +201,36 @@ function install_yara() {
     pushd $SOURCE
     ./bootstrap.sh
     CC="$CC" CXX="$CXX" ./configure --with-pic --enable-static
+    make -j $THREADS
+    sudo make install
+    popd
+  fi
+}
+
+function install_openssl() {
+  SOURCE=openssl-1.0.2e
+  TARBALL=$SOURCE.tar.gz
+  URL=$DEPS_URL/$TARBALL
+
+  if provision openssl /usr/local/lib/libssl.so.1.0.0; then
+    pushd $SOURCE
+    CC="$CC" CXX="$CXX" ./config --prefix=/usr/local --openssldir=/etc/ssl \
+      --libdir=lib shared zlib-dynamic enable-shared
+    make -j $THREADS
+    sudo make install
+    popd
+  fi
+}
+
+function install_bison() {
+  SOURCE=bison-2.5
+  TARBALL=$SOURCE.tar.gz
+  URL=$DEPS_URL/$TARBALL
+
+  if provision bison /usr/local/bin/bison; then
+    pushd $SOURCE
+    CC="$CC" CXX="$CXX" ./configure --prefix=/usr/local \
+      --with-libiconv-prefix=/usr/local/libiconv/
     make -j $THREADS
     sudo make install
     popd
@@ -428,6 +477,7 @@ function package() {
       unset HOMEBREW_BUILD_FROM_SOURCE
       export HOMEBREW_MAKE_JOBS=$THREADS
       export HOMEBREW_NO_EMOJI=1
+      HOMEBREW_ARGS=""
       if [[ $1 = "rocksdb" ]]; then
         # Build RocksDB from source in brew
         export LIBNAME=librocksdb_lite

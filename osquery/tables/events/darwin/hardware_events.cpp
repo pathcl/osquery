@@ -12,49 +12,48 @@
 #include <osquery/logger.h>
 #include <osquery/tables.h>
 
-#include "osquery/events/darwin/iokit_hid.h"
+#include "osquery/events/darwin/iokit.h"
 
 namespace osquery {
 
 /**
  * @brief Track IOKit HID events.
  */
-class HardwareEventSubscriber : public EventSubscriber<IOKitHIDEventPublisher> {
+class HardwareEventSubscriber : public EventSubscriber<IOKitEventPublisher> {
  public:
-  Status init();
+  Status init() override;
 
-  Status Callback(const IOKitHIDEventContextRef& ec, const void* user_data);
+  Status Callback(const IOKitEventContextRef& ec,
+                  const IOKitSubscriptionContextRef& sc);
 };
 
 REGISTER(HardwareEventSubscriber, "event_subscriber", "hardware_events");
 
 Status HardwareEventSubscriber::init() {
   auto subscription = createSubscriptionContext();
-  // We don't want hardware value changes.
-  subscription->values = false;
-
-  subscribe(&HardwareEventSubscriber::Callback, subscription, nullptr);
+  subscribe(&HardwareEventSubscriber::Callback, subscription);
 
   return Status(0, "OK");
 }
 
-Status HardwareEventSubscriber::Callback(const IOKitHIDEventContextRef& ec,
-                                         const void* user_data) {
+Status HardwareEventSubscriber::Callback(
+    const IOKitEventContextRef& ec, const IOKitSubscriptionContextRef& sc) {
   Row r;
+  if (ec->action == IOKitEventContext::Action::DEVICE_ATTACH) {
+    r["action"] = "attach";
+  } else {
+    r["action"] = "detach";
+  }
 
-  r["action"] = ec->action;
-  // There is no path in IOKit, there's a location ID (may be useful).
-  r["path"] = ec->location;
-
-  // Type and driver are the name in IOKit
-  r["type"] = "hid";
-  r["driver"] = ec->transport;
+  r["path"] = ec->path;
+  r["type"] = ec->type;
+  r["driver"] = ec->driver;
 
   r["model_id"] = ec->model_id;
   r["model"] = ec->model;
   r["vendor_id"] = ec->vendor_id;
   r["vendor"] = ec->vendor;
-  r["serial"] = ec->serial; // Not always filled in.
+  r["serial"] = ec->serial;
   r["revision"] = ec->version;
   add(r, ec->time);
   return Status(0, "OK");

@@ -8,21 +8,21 @@
  *
  */
 
-#include <osquery/core.h>
-#include "osquery/events/freebsd/fsevents.h"
+#include <osquery/filesystem.h>
+#include <osquery/tables.h>
 
 namespace osquery {
 namespace tables {
 
-class PasswdChangesEventSubscriber {
- public:
-  QueryData genTable() {
-    QueryData results;
+QueryData genOSVersion(QueryContext& context) {
+  Row r;
 
-    throw std::domain_error("Table not implemented for FreeBSD");
-
-    return results;
-  }
-};
+  r["major"] = "10";
+  r["minor"] = "2";
+  r["patch"] = "";
+  r["name"] = "";
+  r["build"] = "RELEASE";
+  return {r};
+}
 }
 }

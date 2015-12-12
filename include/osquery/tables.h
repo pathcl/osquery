@@ -75,10 +75,23 @@ namespace osquery {
 /// Cast an SQLite affinity type to the literal type.
 #define AS_LITERAL(literal, value) boost::lexical_cast<literal>(value)
 
+enum ColumnType {
+  UNKNOWN_TYPE = 0,
+  TEXT_TYPE,
+  INTEGER_TYPE,
+  BIGINT_TYPE,
+  UNSIGNED_BIGINT_TYPE,
+  DOUBLE_TYPE,
+  BLOB_TYPE,
+};
+
+/// Map of type constant to the SQLite string-name representation.
+extern const std::map<ColumnType, std::string> kColumnTypeNames;
+
 /// Helper alias for TablePlugin names.
 typedef std::string TableName;
-typedef std::vector<std::pair<std::string, std::string> > TableColumns;
-typedef std::map<std::string, std::deque<std::string> > TableData;
+typedef std::vector<std::pair<std::string, ColumnType> > TableColumns;
+struct QueryContext;
 
 /**
  * @brief A ConstraintOperator is applied in an query predicate.
@@ -128,7 +141,7 @@ struct Constraint {
  */
 struct ConstraintList {
   /// The SQLite affinity type.
-  std::string affinity;
+  ColumnType affinity;
 
   /**
    * @brief Check if an expression matches the query constraints.
@@ -170,21 +183,10 @@ struct ConstraintList {
    * @param ops (Optional: default ANY_OP) The operators types to look for.
    * @return true if any constraint exists.
    */
-  bool exists(const ConstraintOperatorFlag ops = ANY_OP) const {
-    if (ops == ANY_OP) {
-      return (constraints_.size() > 0);
-    } else {
-      for (const struct Constraint &c : constraints_) {
-        if (c.op & ops) {
-          return true;
-        }
-      }
-      return false;
-    }
-  }
+  bool exists(const ConstraintOperatorFlag ops = ANY_OP) const;
 
   /**
-   * @brief Check if a constraint exist AND matches the type expression.
+   * @brief Check if a constraint exists AND matches the type expression.
    *
    * See ConstraintList::exists and ConstraintList::matches.
    *
@@ -240,7 +242,7 @@ struct ConstraintList {
   }
 
   /// Constraint list accessor, types and operator.
-  const std::vector<struct Constraint> getAll() const { return constraints_; }
+  const std::vector<struct Constraint>& getAll() const { return constraints_; }
 
   /**
    * @brief Add a new Constraint to the list of constraints.
@@ -267,11 +269,14 @@ struct ConstraintList {
   /// See ConstraintList::unserialize.
   void unserialize(const boost::property_tree::ptree& tree);
 
-  ConstraintList() : affinity("TEXT") {}
+  ConstraintList() : affinity(TEXT_TYPE) {}
 
  private:
   /// List of constraint operator/expressions.
   std::vector<struct Constraint> constraints_;
+
+ private:
+  friend struct QueryContext;
 
  private:
   FRIEND_TEST(TablesTests, test_constraint_list);
@@ -287,11 +292,69 @@ typedef std::vector<std::pair<std::string, struct Constraint> > ConstraintSet;
  * on query components like predicate constraints and limits.
  */
 struct QueryContext {
+  /**
+   * @brief Check if a constraint exists for a given column operator pair.
+   *
+   * Operator and expression existence and matching occurs on the constraint
+   * list for a given column name. The query context maintains a map of columns
+   * to potentially empty constraint lists. Check if a constraint exists with
+   * any operator or for a specific operator, usually equality (EQUALS).
+   *
+   * @param column The name of a column within this table.
+   * @param optional op Check for a specific constraint operator.
+   * @return true if a constraint exists, false if empty or no operator match.
+   */
+  bool hasConstraint(const std::string& column,
+                     ConstraintOperator op = EQUALS) const;
+
+  /**
+   * @brief Apply a predicate function to each expression in a constraint list.
+   *
+   * Most constraint sets are use to extract expressions or perform a row
+   * generation for each expressions (given an operator).
+   *
+   * This prevents the caller (table implementation) from extracting the set
+   * and iterating separately on potentially duplicate and copied data. The
+   * predicate function is provided two arguments:
+   *  - An iterating reference to each expression for the given operator.
+   *
+   * @param column The name of a column within this table.
+   * @param op The comparison or expression operator (e.g., EQUALS).
+   * @param predicate A predicate receiving each expression.
+   */
+  template <typename T>
+  void forEachConstraint(const std::string& column,
+                         ConstraintOperator op,
+                         std::function<void(const T& expr)> predicate) const {
+    if (constraints.count(column) > 0) {
+      const auto& list = constraints.at(column);
+      if (list.affinity == TEXT_TYPE) {
+        for (const auto& constraint : list.constraints_) {
+          if (constraint.op == op) {
+            predicate(constraint.expr);
+          }
+        }
+      } else {
+        auto constraint_set = list.getAll<T>(op);
+        for (const auto& constraint : constraint_set) {
+          predicate(constraint);
+        }
+      }
+    }
+  }
+
+  void forEachConstraint(
+      const std::string& column,
+      ConstraintOperator op,
+      std::function<void(const std::string& expr)> predicate) const {
+    return forEachConstraint<std::string>(column, op, predicate);
+  }
+
   ConstraintMap constraints;
   /// Support a limit to the number of results.
-  int limit;
-
-  QueryContext() : limit(0) {}
+  int limit{0};
+  /// Is the table allowed to "traverse" directories.
+  bool traverse{false};
 };
 
 typedef struct QueryContext QueryContext;
@@ -309,38 +372,130 @@ typedef struct Constraint Constraint;
  */
 class TablePlugin : public Plugin {
  protected:
-  virtual TableColumns columns() const {
-    TableColumns columns;
-    return columns;
-  }
+  /// Return the table's column name and type pairs.
+  virtual TableColumns columns() const { return TableColumns(); }
 
-  virtual QueryData generate(QueryContext& request) {
-    QueryData data;
-    return data;
-  }
+  /**
+   * @brief Generate a complete table representation.
+   *
+   * The TablePlugin::generate method is the most important part of the table.
+   * This should return a best-effort match of the expected results for a
+   * query. In common cases, this returns all rows for a virtual table.
+   * For EventSubscriber tables this will perform database lookups for events
+   * matching several conditions such as time within the SQL query or the last
+   * time the EventSubscriber was called.
+   *
+   * The context input is filled in "as best possible" by SQLite's
+   * virtual table APIs. In the best case this context include a limit or
+   * constraints organized by each possible column.
+   *
+   * @param request A query context filled in by SQLite's virtual table API.
+   * @return The result rows for this table, given the query context.
+   */
+  virtual QueryData generate(QueryContext& request) { return QueryData(); }
 
  protected:
+  /// An SQL table containing the table definition/syntax.
   std::string columnDefinition() const;
+
+  /// Return the name and column pairs for attaching virtual tables.
   PluginResponse routeInfo() const;
 
+  /**
+   * @brief Check if there are fresh cache results for this table.
+   *
+   * Table results are considered fresh when evaluated against a given interval.
+   * The interval is the expected rate for which this data should be generated.
+   * Caching and cache freshness only applies to queries acting on tables
+   * within a schedule. If two queries "one" and "two" both inspect the
+   * table "processes" at the interval 60. The first executed will cache results
+   * and the second will use the cached results.
+   *
+   * Table results are not cached if a QueryContext contains constraints or
+   * provides HOB (hand-off blocks) to additional tables within a query.
+   * Currently, the query scheduler cannot communicate to table implementations.
+   * An interval is set globally by the scheduler and passed to the table
+   * implementation as a future-proof API. There is no "shortcut" for caching
+   * when used in external tables. A cache lookup within an extension means
+   * a database call API and re-serialization to the virtual table APIs. In
+   * practice this does not perform well and is explicitly disabled.
+   *
+   * @param interval The interval this query expects the tables results.
+   * @return True if the cache contains fresh results, otherwise false.
+   */
+  bool isCached(size_t interval);
+
+  /**
+   * @brief Perform a database lookup of cached results and deserialize.
+   *
+   * If a query determined the table's cached results are fresh, it may ask the
+   * table to retrieve results from the database and deserialized them into
+   * table row data.
+   *
+   * @return The deserialized row data of cached results.
+   */
+  QueryData getCache() const;
+
+  /// Similar to TablePlugin::getCache, if TablePlugin::generate is called.
+  void setCache(size_t step, size_t interval, const QueryData& results);
+
+ private:
+  /// The last time in seconds the table data results were saved to cache.
+  size_t last_cached_{0};
+  /// The last interval in seconds when the table data was cached.
+  size_t last_interval_{0};
+
  public:
-  /// Public API methods.
+  /**
+   * @brief The scheduled interval for the executing query.
+   *
+   * Scheduled queries execute within a pseudo-mutex, and each may communicate
+   * their scheduled interval to internal TablePlugin implementations. If the
+   * table is cachable then the interval can be used to calculate freshness.
+   */
+  static size_t kCacheInterval;
+  /// The schedule step, this is the current position of the schedule.
+  static size_t kCacheStep;
+
+ public:
+  /**
+   * @brief The registry call "router".
+   *
+   * Like all of osquery's Plugin%s, the TablePlugin uses a "call" router to
+   * handle requests and responses from extensions. The TablePlugin uses an
+   * "action" key, which can be:
+   *   - generate: call the plugin's row generate method (defined in spec).
+   *   - columns: return a list of column name and SQLite types.
+   *   - definition: return an SQL statement for table creation.
+   *
+   * @param request The plugin request, must include an action key.
+   * @param response A plugin response, for generation this contains the rows.
+   */
   Status call(const PluginRequest& request, PluginResponse& response);
 
  public:
-  /// Helper data structure transformation methods
+  /// Helper data structure transformation methods.
   static void setRequestFromContext(const QueryContext& context,
                                     PluginRequest& request);
-  static void setResponseFromQueryData(const QueryData& data,
-                                       PluginResponse& response);
+
+  /// Helper data structure transformation methods.
   static void setContextFromRequest(const PluginRequest& request,
                                     QueryContext& context);
 
  public:
-  /// When external table plugins are registered the core will attach them
-  /// as virtual tables to the SQL internal implementation
+  /**
+   * @brief Add a virtual table that exists in an extension.
+   *
+   * When external table plugins are registered the core will attach them
+   * as virtual tables to the SQL internal implementation.
+   *
+   * @param name The table name.
+   * @param info The route info (column name and type pairs).
+   */
   static Status addExternal(const std::string& name,
                             const PluginResponse& info);
+
+  /// Remove an extension's table from the SQL virtual database.
   static void removeExternal(const std::string& name);
 
  private:
@@ -350,7 +505,17 @@ class TablePlugin : public Plugin {
 
 /// Helper method to generate the virtual table CREATE statement.
 std::string columnDefinition(const TableColumns& columns);
+
+/// Helper method to generate the virtual table CREATE statement.
 std::string columnDefinition(const PluginResponse& response);
+
+/// Get the string representation for an SQLite column type.
+inline const std::string& columnTypeName(ColumnType type) {
+  return kColumnTypeNames.at(type);
+}
+
+/// Get the column type from the string representation.
+ColumnType columnTypeName(const std::string& type);
 
 CREATE_LAZY_REGISTRY(TablePlugin, "table");
 }

@@ -27,15 +27,18 @@
 
 namespace pt = boost::property_tree;
 namespace fs = boost::filesystem;
+namespace errc = boost::system::errc;
 
 namespace osquery {
 
 FLAG(uint64, read_max, 50 * 1024 * 1024, "Maximum file read size");
 FLAG(uint64, read_user_max, 10 * 1024 * 1024, "Maximum non-su read size");
-FLAG(bool, read_user_links, true, "Read user-owned filesystem links");
 
-// See reference #1382 for reasons why someone would allow unsafe.
+/// See reference #1382 for reasons why someone would allow unsafe.
 HIDDEN_FLAG(bool, allow_unsafe, false, "Allow unsafe executable permissions");
+
+/// Disable forensics (atime/mtime preserving) file reads.
+HIDDEN_FLAG(bool, disable_forensic, false, "Disable atime/mtime preservation");
 
 static const size_t kMaxRecursiveGlobs = 64;
 
@@ -57,8 +60,8 @@ Status writeTextFile(const fs::path& path,
     return Status(1, "Failed to change permissions for file: " + path.string());
   }
 
-  auto bytes = write(output_fd, content.c_str(), content.size());
-  if (bytes != content.size()) {
+  ssize_t bytes = write(output_fd, content.c_str(), content.size());
+  if (static_cast<size_t>(bytes) != content.size()) {
     close(output_fd);
     return Status(1, "Failed to write contents to file: " + path.string());
   }
@@ -67,40 +70,56 @@ Status writeTextFile(const fs::path& path,
   return Status(0, "OK");
 }
 
-Status readFile(const fs::path& path, std::string& content, bool dry_run) {
-  struct stat file;
-  if (lstat(path.string().c_str(), &file) == 0 && S_ISLNK(file.st_mode)) {
-    if (file.st_uid != 0 && !FLAGS_read_user_links) {
-      return Status(1, "User link reads disabled");
+struct OpenReadableFile {
+ public:
+  OpenReadableFile(const fs::path& path) {
+    dropper_ = DropPrivileges::get();
+    if (dropper_->dropToParent(path)) {
+      // Open the file descriptor and allow caller to perform error checking.
+      fd = open(path.string().c_str(), O_RDONLY | O_NONBLOCK);
     }
   }
 
-  if (stat(path.string().c_str(), &file) < 0) {
+  ~OpenReadableFile() {
+    if (fd > 0) {
+      close(fd);
+    }
+  }
+
+  int fd{0};
+
+ private:
+  DropPrivilegesRef dropper_{nullptr};
+};
+
+Status readFile(
+    const fs::path& path,
+    size_t size,
+    size_t block_size,
+    bool dry_run,
+    bool preserve_time,
+    std::function<void(std::string& buffer, size_t size)> predicate) {
+  auto handle = OpenReadableFile(path);
+  if (handle.fd < 0) {
+    return Status(1, "Cannot open file for reading: " + path.string());
+  }
+
+  struct stat file;
+  if (fstat(handle.fd, &file) < 0) {
     return Status(1, "Cannot access path: " + path.string());
-  } else if (file.st_uid != 0 && S_ISFIFO(file.st_mode)) {
-    return Status(1, "User FIFO reads are disabled");
+  }
+
+  off_t file_size = file.st_size;
+  if (file_size == 0 && size > 0) {
+    file_size = static_cast<off_t>(size);
   }
 
   // Apply the max byte-read based on file/link target ownership.
-  size_t read_max = (file.st_uid == 0)
-                        ? FLAGS_read_max
-                        : std::min(FLAGS_read_max, FLAGS_read_user_max);
-  std::ifstream is(path.string(), std::ifstream::binary | std::ios::ate);
-  if (!is.is_open()) {
-    // Attempt to read without seeking to the end.
-    is.open(path.string(), std::ifstream::binary);
-    if (!is) {
-      return Status(1, "Error reading file: " + path.string());
-    }
-  }
-
-  // Attempt to read the file size.
-  ssize_t size = is.tellg();
-
-  // Erase/clear provided string buffer.
-  content.erase();
-  if (size > read_max) {
-    VLOG(1) << "Cannot read " << path << " size exceeds limit: " << size
+  off_t read_max = (file.st_uid == 0)
+                       ? FLAGS_read_max
+                       : std::min(FLAGS_read_max, FLAGS_read_user_max);
+  if (file_size > read_max) {
+    VLOG(1) << "Cannot read " << path << " size exceeds limit: " << file_size
             << " > " << read_max;
     return Status(1, "File exceeds read limits");
   }
@@ -111,26 +130,69 @@ Status readFile(const fs::path& path, std::string& content, bool dry_run) {
     return Status(0, fs::canonical(path, ec).string());
   }
 
-  // Reset seek to the start of the stream.
-  is.seekg(0);
-  if (size == -1 || size == 0) {
-    // Size could not be determined. This may be a special device.
-    std::stringstream buffer;
-    buffer << is.rdbuf();
-    if (is.bad()) {
-      return Status(1, "Error reading special file: " + path.string());
-    }
-    content.assign(std::move(buffer.str()));
+  struct timeval times[2];
+#if defined(__linux__)
+  TIMESPEC_TO_TIMEVAL(&times[0], &file.st_atim);
+  TIMESPEC_TO_TIMEVAL(&times[1], &file.st_mtim);
+#else
+  TIMESPEC_TO_TIMEVAL(&times[0], &file.st_atimespec);
+  TIMESPEC_TO_TIMEVAL(&times[1], &file.st_mtimespec);
+#endif
+
+  if (file_size == 0) {
+    off_t total_bytes = 0;
+    ssize_t part_bytes = 0;
+    do {
+      auto part = std::string(4096, '\0');
+      part_bytes = read(handle.fd, &part[0], block_size);
+      if (part_bytes > 0) {
+        total_bytes += part_bytes;
+        if (total_bytes >= read_max) {
+          return Status(1, "File exceeds read limits");
+        }
+        //        content += part.substr(0, part_bytes);
+        predicate(part, part_bytes);
+      }
+    } while (part_bytes > 0);
   } else {
-    content = std::string(size, '\0');
-    is.read(&content[0], size);
+    auto content = std::string(file_size, '\0');
+    read(handle.fd, &content[0], file_size);
+    predicate(content, file_size);
+  }
+
+  // Attempt to restore the atime and mtime before the file read.
+  if (preserve_time && !FLAGS_disable_forensic) {
+    futimes(handle.fd, times);
   }
   return Status(0, "OK");
 }
 
+Status readFile(const fs::path& path,
+                std::string& content,
+                size_t size,
+                bool dry_run,
+                bool preserve_time) {
+  return readFile(path,
+                  size,
+                  4096,
+                  dry_run,
+                  preserve_time,
+                  ([&content](std::string& buffer, size_t size) {
+                    if (buffer.size() == size) {
+                      content += std::move(buffer);
+                    } else {
+                      content += std::move(std::string(buffer, size));
+                    }
+                  }));
+}
+
 Status readFile(const fs::path& path) {
   std::string blank;
-  return readFile(path, blank, true);
+  return readFile(path, blank, 0, true, false);
+}
+
+Status forensicReadFile(const fs::path& path, std::string& content) {
+  return readFile(path, content, 0, false, true);
 }
 
 Status isWritable(const fs::path& path) {
@@ -158,17 +220,14 @@ Status isReadable(const fs::path& path) {
 }
 
 Status pathExists(const fs::path& path) {
+  boost::system::error_code ec;
   if (path.empty()) {
     return Status(1, "-1");
   }
 
   // A tri-state determination of presence
-  try {
-    if (!fs::exists(path)) {
-      return Status(1, "0");
-    }
-  } catch (const fs::filesystem_error& e) {
-    return Status(1, e.what());
+  if (!fs::exists(path, ec) || ec.value() != errc::success) {
+    return Status(1, ec.message());
   }
   return Status(0, "1");
 }
@@ -255,40 +314,30 @@ inline void replaceGlobWildcards(std::string& pattern) {
 inline Status listInAbsoluteDirectory(const fs::path& path,
                                       std::vector<std::string>& results,
                                       GlobLimits limits) {
-  try {
-    if (path.filename() == "*" && !fs::exists(path.parent_path())) {
-      return Status(1, "Directory not found: " + path.parent_path().string());
-    }
-
-    if (path.filename() == "*" && !fs::is_directory(path.parent_path())) {
-      return Status(1, "Path not a directory: " + path.parent_path().string());
-    }
-  } catch (const fs::filesystem_error& e) {
-    return Status(1, e.what());
+  if (path.filename() == "*" && !pathExists(path.parent_path())) {
+    return Status(1, "Directory not found: " + path.parent_path().string());
   }
+
+  if (path.filename() == "*" && !isDirectory(path.parent_path())) {
+    return Status(1, "Path not a directory: " + path.parent_path().string());
+  }
+
   genGlobs(path.string(), results, limits);
   return Status(0, "OK");
 }
 
 Status listFilesInDirectory(const fs::path& path,
                             std::vector<std::string>& results,
-                            bool ignore_error) {
-  return listInAbsoluteDirectory((path / "*"), results, GLOB_FILES);
+                            bool recursive) {
+  return listInAbsoluteDirectory(
+      (path / ((recursive) ? "**" : "*")), results, GLOB_FILES);
 }
 
 Status listDirectoriesInDirectory(const fs::path& path,
                                   std::vector<std::string>& results,
-                                  bool ignore_error) {
-  return listInAbsoluteDirectory((path / "*"), results, GLOB_FOLDERS);
-}
-
-Status getDirectory(const fs::path& path, fs::path& dirpath) {
-  if (!isDirectory(path).ok()) {
-    dirpath = fs::path(path).parent_path().string();
-    return Status(0, "OK");
-  }
-  dirpath = path;
-  return Status(1, "Path is a directory: " + path.string());
+                                  bool recursive) {
+  return listInAbsoluteDirectory(
+      (path / ((recursive) ? "**" : "*")), results, GLOB_FOLDERS);
 }
 
 Status isDirectory(const fs::path& path) {
@@ -296,7 +345,11 @@ Status isDirectory(const fs::path& path) {
   if (fs::is_directory(path, ec)) {
     return Status(0, "OK");
   }
-  if (ec.value() == 0) {
+
+  // The success error code is returned for as a failure (undefined error)
+  // We need to flip that into an error, a success would have falling through
+  // in the above conditional.
+  if (ec.value() == errc::success) {
     return Status(1, "Path is not a directory: " + path.string());
   }
   return Status(ec.value(), ec.message());
