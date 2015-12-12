@@ -10,10 +10,15 @@
 
 #pragma once
 
+#include <limits.h>
+
 #include <memory>
+#include <string>
 
 #include <boost/bind.hpp>
 #include <boost/shared_ptr.hpp>
+
+#include <osquery/status.h>
 
 #ifdef DARWIN
 #include <CoreFoundation/CoreFoundation.h>
@@ -68,6 +73,52 @@ std::string base64Encode(const std::string& unencoded);
  * @return If the string is printable.
  */
 bool isPrintable(const std::string& check);
+
+/// Safely convert a string representation of an integer base.
+inline Status safeStrtol(const std::string& rep, size_t base, long int& out) {
+  char* end{nullptr};
+  out = strtol(rep.c_str(), &end, base);
+  if (end == nullptr || end == rep.c_str() || *end != '\0' ||
+      ((out == LONG_MIN || out == LONG_MAX) && errno == ERANGE)) {
+    return Status(1);
+  }
+  return Status(0);
+}
+
+/// Safely convert a string representation of an integer base.
+inline Status safeStrtoll(const std::string& rep, size_t base, long long& out) {
+  char* end{nullptr};
+  out = strtoll(rep.c_str(), &end, base);
+  if (end == nullptr || end == rep.c_str() || *end != '\0' ||
+      ((out == LLONG_MIN || out == LLONG_MAX) && errno == ERANGE)) {
+    return Status(1);
+  }
+  return Status(0);
+}
+
+/// Safely convert unicode escaped ASCII.
+inline std::string unescapeUnicode(const std::string& escaped) {
+  if (escaped.size() < 6) {
+    return escaped;
+  }
+
+  std::string unescaped;
+  unescaped.reserve(escaped.size());
+  for (size_t i = 0; i < escaped.size(); ++i) {
+    if (i < escaped.size() - 5 && '\\' == escaped[i] && 'u' == escaped[i + 1]) {
+      // Assume 2-byte wide unicode.
+      long value{0};
+      safeStrtol(escaped.substr(i + 2, i + 6), 16, value);
+      if (value < 255) {
+        unescaped += static_cast<char>(value);
+        i += 5;
+        continue;
+      }
+    }
+    unescaped += escaped[i];
+  }
+  return unescaped;
+}
 
 #ifdef DARWIN
 /**

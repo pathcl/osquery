@@ -51,6 +51,42 @@ Status INotifyEventPublisher::setUp() {
   return Status(0, "OK");
 }
 
+bool INotifyEventPublisher::monitorSubscription(
+    INotifySubscriptionContextRef& sc, bool add_watch) {
+  sc->discovered_ = sc->path;
+  if (sc->path.find("**") != std::string::npos) {
+    sc->recursive = true;
+    sc->discovered_ = sc->path.substr(0, sc->path.find("**"));
+    sc->path = sc->discovered_;
+  }
+
+  if (sc->path.find('*') != std::string::npos) {
+    // If the wildcard exists within the file (leaf), remove and monitor the
+    // directory instead. Apply a fnmatch on fired events to filter leafs.
+    auto fullpath = fs::path(sc->path);
+    if (fullpath.filename().string().find('*') != std::string::npos) {
+      sc->discovered_ = fullpath.parent_path().string() + '/';
+    }
+
+    if (sc->discovered_.find('*') != std::string::npos) {
+      // If a wildcard exists within the tree (stem), resolve at configure
+      // time and monitor each path.
+      std::vector<std::string> paths;
+      resolveFilePattern(sc->discovered_, paths);
+      for (const auto& _path : paths) {
+        addMonitor(_path, sc->mask, sc->recursive, add_watch);
+      }
+      sc->recursive_match = sc->recursive;
+      return true;
+    }
+  }
+  if (isDirectory(sc->discovered_) && sc->discovered_.back() != '/') {
+    sc->path += '/';
+    sc->discovered_ += '/';
+  }
+  return addMonitor(sc->discovered_, sc->mask, sc->recursive, add_watch);
+}
+
 void INotifyEventPublisher::configure() {
   for (auto& sub : subscriptions_) {
     // Anytime a configure is called, try to monitor all subscriptions.
@@ -60,35 +96,7 @@ void INotifyEventPublisher::configure() {
     if (sc->discovered_.size() > 0) {
       continue;
     }
-
-    sc->discovered_ = sc->path;
-    if (sc->path.find("**") != std::string::npos) {
-      sc->recursive = true;
-      sc->discovered_ = sc->path.substr(0, sc->path.find("**"));
-      sc->path = sc->discovered_;
-    }
-
-    if (sc->path.find('*') != std::string::npos) {
-      // If the wildcard exists within the file (leaf), remove and monitor the
-      // directory instead. Apply a fnmatch on fired events to filter leafs.
-      auto fullpath = fs::path(sc->path);
-      if (fullpath.filename().string().find('*') != std::string::npos) {
-        sc->discovered_ = fullpath.parent_path().string();
-      }
-
-      if (sc->discovered_.find('*') != std::string::npos) {
-        // If a wildcard exists within the tree (stem), resolve at configure
-        // time and monitor each path.
-        std::vector<std::string> paths;
-        resolveFilePattern(sc->discovered_, paths);
-        for (const auto& _path : paths) {
-          addMonitor(_path, sc->recursive);
-        }
-        sc->recursive_match = sc->recursive;
-        continue;
-      }
-    }
-    addMonitor(sc->discovered_, sc->recursive);
+    monitorSubscription(sc);
   }
 }
 
@@ -97,15 +105,17 @@ void INotifyEventPublisher::tearDown() {
   inotify_handle_ = -1;
 }
 
-Status INotifyEventPublisher::restartMonitoring(){
+Status INotifyEventPublisher::restartMonitoring() {
   if (last_restart_ != 0 && getUnixTime() - last_restart_ < 10) {
     return Status(1, "Overflow");
   }
+
   last_restart_ = getUnixTime();
   VLOG(1) << "inotify was overflown, attempting to restart handle";
-  for(const auto& desc : descriptors_){
-    removeMonitor(desc, 1);
+  for (const auto& desc : descriptors_) {
+    removeMonitor(desc, true);
   }
+
   path_descriptors_.clear();
   descriptor_paths_.clear();
   configure();
@@ -123,7 +133,7 @@ Status INotifyEventPublisher::run() {
   struct timeval timeout = {1, 0};
   int selector = ::select(getHandle() + 1, &set, nullptr, nullptr, &timeout);
   if (selector == -1) {
-    LOG(ERROR) << "Could not read inotify handle";
+    LOG(WARNING) << "Could not read inotify handle";
     return Status(1, "INotify handle failed");
   }
 
@@ -142,7 +152,7 @@ Status INotifyEventPublisher::run() {
     if (event->mask & IN_Q_OVERFLOW) {
       // The inotify queue was overflown (remove all paths).
       Status stat = restartMonitoring();
-      if(!stat.ok()){
+      if (!stat.ok()) {
         return stat;
       }
     }
@@ -196,6 +206,8 @@ bool INotifyEventPublisher::shouldFire(const INotifySubscriptionContextRef& sc,
     if (found != 0) {
       return false;
     }
+  } else if (ec->path == sc->path) {
+    return true;
   } else if (fnmatch((sc->path + "*").c_str(),
                      ec->path.c_str(),
                      FNM_PATHNAME | FNM_CASEFOLD |
@@ -210,19 +222,25 @@ bool INotifyEventPublisher::shouldFire(const INotifySubscriptionContextRef& sc,
   }
 
   // inotify will not monitor recursively, new directories need watches.
-  if(sc->recursive && ec->action == "CREATED" && isDirectory(ec->path)){
-    const_cast<INotifyEventPublisher*>(this)->addMonitor(ec->path + '/', true);
+  if (sc->recursive && ec->action == "CREATED" && isDirectory(ec->path)) {
+    const_cast<INotifyEventPublisher*>(this)
+        ->addMonitor(ec->path + '/', sc->mask, true);
   }
 
   return true;
 }
 
 bool INotifyEventPublisher::addMonitor(const std::string& path,
-                                       bool recursive) {
+                                       uint32_t mask,
+                                       bool recursive,
+                                       bool add_watch) {
   if (!isPathMonitored(path)) {
-    int watch = ::inotify_add_watch(getHandle(), path.c_str(), IN_ALL_EVENTS);
-    if (watch == -1) {
-      LOG(ERROR) << "Could not add inotify watch on: " << path;
+    int watch =
+        ::inotify_add_watch(getHandle(),
+                            path.c_str(),
+                            ((mask == 0) ? IN_ALL_EVENTS ^ IN_ACCESS : mask));
+    if (add_watch && watch == -1) {
+      LOG(WARNING) << "Could not add inotify watch on: " << path;
       return false;
     }
 
@@ -237,10 +255,12 @@ bool INotifyEventPublisher::addMonitor(const std::string& path,
   if (recursive && isDirectory(path).ok()) {
     std::vector<std::string> children;
     // Get a list of children of this directory (requested recursive watches).
-    listDirectoriesInDirectory(path, children);
+    listDirectoriesInDirectory(path, children, true);
 
+    boost::system::error_code ec;
     for (const auto& child : children) {
-      addMonitor(child, recursive);
+      auto canonicalized = fs::canonical(child, ec).string() + '/';
+      addMonitor(canonicalized, mask, false);
     }
   }
 
@@ -275,23 +295,28 @@ bool INotifyEventPublisher::removeMonitor(int watch, bool force) {
   return removeMonitor(path, force);
 }
 
+void INotifyEventPublisher::removeSubscriptions() {
+  auto paths = descriptor_paths_;
+  for (const auto& path : paths) {
+    removeMonitor(path.first, true);
+  }
+  EventPublisherPlugin::removeSubscriptions();
+}
+
 bool INotifyEventPublisher::isPathMonitored(const std::string& path) {
-  boost::filesystem::path parent_path;
+  std::string parent_path;
   if (!isDirectory(path).ok()) {
     if (path_descriptors_.find(path) != path_descriptors_.end()) {
       // Path is a file, and is directly monitored.
       return true;
     }
-    if (!getDirectory(path, parent_path).ok()) {
-      // Could not get parent of unmonitored file.
-      return false;
-    }
+    // Important to add a trailing "/" for inotify.
+    parent_path = fs::path(path).parent_path().string() + '/';
   } else {
     parent_path = path;
   }
-
   // Directory or parent of file monitoring
-  auto path_iterator = path_descriptors_.find(parent_path.string());
+  auto path_iterator = path_descriptors_.find(parent_path);
   return (path_iterator != path_descriptors_.end());
 }
 }

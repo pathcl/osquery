@@ -25,7 +25,7 @@ function main() {
   distro $OS DISTRO
   threads THREADS
 
-  if [[ ! -f /usr/bin/sudo ]]; then
+  if ! hash sudo 2>/dev/null; then
    echo "Please install sudo in this machine"
    exit 0
   fi
@@ -88,6 +88,7 @@ function main() {
 
   cd "$SCRIPT_DIR/../"
 
+  sudo pip install --upgrade pip
   sudo pip install -r requirements.txt
 
   # Reset any work or artifacts from build tests in TP.

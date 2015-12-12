@@ -48,7 +48,13 @@ const std::string kSQLGlobRecursive = kSQLGlobWildcard + kSQLGlobWildcard;
  */
 Status readFile(const boost::filesystem::path& path,
                 std::string& content,
-                bool dry_run = false);
+                size_t size = 0,
+                bool dry_run = false,
+                bool preserve_time = false);
+
+/// Read a file and preserve the atime and mtime.
+Status forensicReadFile(const boost::filesystem::path& path,
+                        std::string& content);
 
 /**
  * @brief Return the status of an attempted file read.
@@ -59,6 +65,15 @@ Status readFile(const boost::filesystem::path& path,
  * message is the complete/absolute path.
  */
 Status readFile(const boost::filesystem::path& path);
+
+/// Internal representation for predicate-based chunk reading.
+Status readFile(
+    const boost::filesystem::path& path,
+    size_t size,
+    size_t block_size,
+    bool dry_run,
+    bool preserve_time,
+    std::function<void(std::string& buffer, size_t size)> predicate);
 
 /**
  * @brief Write text to disk.
@@ -94,18 +109,19 @@ Status isReadable(const boost::filesystem::path& path);
 Status pathExists(const boost::filesystem::path& path);
 
 /**
- * @brief List all of the files in a specific directory, non-recursively.
+ * @brief List all of the files in a specific directory.
  *
  * @param path the path which you would like to list.
  * @param results a non-const reference to a vector which will be populated
  * with the directory listing of the path param, assuming that all operations
  * completed successfully.
+ * @param recursive should the listing descend recursively into the directory.
  *
  * @return an instance of Status, indicating success or failure.
  */
 Status listFilesInDirectory(const boost::filesystem::path& path,
                             std::vector<std::string>& results,
-                            bool ignore_error = 1);
+                            bool recursive = false);
 
 /**
  * @brief List all of the directories in a specific directory, non-recursively.
@@ -114,12 +130,13 @@ Status listFilesInDirectory(const boost::filesystem::path& path,
  * @param results a non-const reference to a vector which will be populated
  * with the directory listing of the path param, assuming that all operations
  * completed successfully.
+ * @param recursive should the listing descend recursively into the directory.
  *
  * @return an instance of Status, indicating success or failure.
  */
 Status listDirectoriesInDirectory(const boost::filesystem::path& path,
                                   std::vector<std::string>& results,
-                                  bool ignore_error = 1);
+                                  bool recursive = false);
 
 /**
  * @brief Given a filesystem globbing patten, resolve all matching paths.
@@ -171,18 +188,6 @@ Status resolveFilePattern(const boost::filesystem::path& pattern,
  * @param pattern the input and output filesystem glob pattern.
  */
 void replaceGlobWildcards(std::string& pattern);
-
-/**
- * @brief Get directory portion of a path.
- *
- * @param path input path, either a filename or directory.
- * @param dirpath output path set to the directory-only path.
- *
- * @return If the input path was a directory this will indicate failure. One
- * should use `isDirectory` before.
- */
-Status getDirectory(const boost::filesystem::path& path,
-                    boost::filesystem::path& dirpath);
 
 /// Attempt to remove a directory path.
 Status remove(const boost::filesystem::path& path);

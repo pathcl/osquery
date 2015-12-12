@@ -23,6 +23,7 @@ import utils
 
 
 class AdditionalFeatureTests(test_base.ProcessGenerator, unittest.TestCase):
+    @test_base.flaky
     def test_query_packs(self):
         query_pack_path = test_base.CONFIG_DIR + "/test_pack.conf"
         utils.write_config({
@@ -42,10 +43,13 @@ class AdditionalFeatureTests(test_base.ProcessGenerator, unittest.TestCase):
         # Get a daemon process, loaded with the default test configuration.
         # We'll add a config override (overwrite) for the "packs" key.
         # THis will point a single pack at the config written above.
-        daemon = self._run_daemon(overwrite={
+        daemon = self._run_daemon({
+            "disable_watchdog": True,
+            },
+            overwrite={
             "packs": {
                 "test_pack": query_pack_path
-            }
+            },
         })
         self.assertTrue(daemon.isAlive())
 
@@ -56,6 +60,11 @@ class AdditionalFeatureTests(test_base.ProcessGenerator, unittest.TestCase):
         em = client.getEM()
 
         # Every query from the pack(s) is added to the packs table.
+        def get_packs():
+            result = em.query("select * from osquery_packs")
+            return len(result.response) == 2
+        # Allow the daemon some lag to parse the pack content.
+        test_base.expectTrue(get_packs)
         result = em.query("select * from osquery_packs")
         self.assertEqual(len(result.response), 2)
 

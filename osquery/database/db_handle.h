@@ -69,6 +69,12 @@ class DBHandle {
    */
   static bool checkDB();
 
+  /// Require all DBHandle accesses to open a read and write handle.
+  static void setRequireWrite(bool rw) { kDBHandleOptionRequireWrite = rw; }
+
+  /// Allow DBHandle creations.
+  static void setAllowOpen(bool ao) { kDBHandleOptionAllowOpen = ao; }
+
  private:
   /////////////////////////////////////////////////////////////////////////////
   // Data access methods
@@ -214,6 +220,12 @@ class DBHandle {
    * @return a pointer to the underlying RocksDB database handle
    */
   rocksdb::DB* getDB() const;
+
+ public:
+  /// Control availability of the RocksDB handle (default false).
+  static bool kDBHandleOptionAllowOpen;
+  // The database must be opened in a R/W mode (default false).
+  static bool kDBHandleOptionRequireWrite;
 
  private:
   /////////////////////////////////////////////////////////////////////////////

@@ -26,18 +26,19 @@ FLAG(bool, enable_monitor, false, "Enable the schedule monitor");
 
 FLAG(uint64, schedule_timeout, 0, "Limit the schedule, 0 for no limit")
 
-static inline SQL monitor(const std::string& name,
-                          const ScheduledQuery& query) {
+inline SQL monitor(const std::string& name, const ScheduledQuery& query) {
   // Snapshot the performance and times for the worker before running.
   auto pid = std::to_string(getpid());
   auto r0 = SQL::selectAllFrom("processes", "pid", EQUALS, pid);
-  auto t0 = time(nullptr);
+  auto t0 = getUnixTime();
   Config::getInstance().recordQueryStart(name);
   auto sql = SQLInternal(query.query);
   // Snapshot the performance after, and compare.
-  auto t1 = time(nullptr);
+  auto t1 = getUnixTime();
   auto r1 = SQL::selectAllFrom("processes", "pid", EQUALS, pid);
   if (r0.size() > 0 && r1.size() > 0) {
+    // Calculate a size as the expected byte output of results.
+    // This does not dedup result differentials and is not aware of snapshots.
     size_t size = 0;
     for (const auto& row : sql.rows()) {
       for (const auto& column : row) {
@@ -45,6 +46,7 @@ static inline SQL monitor(const std::string& name,
         size += column.second.size();
       }
     }
+    // Always called while processes table is working.
     Config::getInstance().recordQueryPerformance(
         name, t1 - t0, size, r0[0], r1[0]);
   }
@@ -83,6 +85,9 @@ void launchQuery(const std::string& name, const ScheduledQuery& query) {
 
   // Create a database-backed set of query results.
   auto dbQuery = Query(name, query);
+  // Comparisons and stores must include escaped data.
+  sql.escapeResults();
+
   DiffResults diff_results;
   // Add this execution's set of results to the database-tracked named query.
   // We can then ask for a differential from the last time this named query
@@ -112,13 +117,14 @@ void launchQuery(const std::string& name, const ScheduledQuery& query) {
 }
 
 void SchedulerRunner::start() {
-  time_t t = std::time(nullptr);
-  struct tm* local = std::localtime(&t);
-  unsigned long int i = local->tm_sec;
+  // Start the counter at the second.
+  auto i = osquery::getUnixTime();
   for (; (timeout_ == 0) || (i <= timeout_); ++i) {
     Config::getInstance().scheduledQueries(
         ([&i](const std::string& name, const ScheduledQuery& query) {
           if (query.splayed_interval > 0 && i % query.splayed_interval == 0) {
+            TablePlugin::kCacheInterval = query.splayed_interval;
+            TablePlugin::kCacheStep = i;
             launchQuery(name, query);
           }
         }));

@@ -17,91 +17,29 @@
 
 #include <boost/iterator/filter_iterator.hpp>
 #include <boost/property_tree/ptree.hpp>
-#include <boost/property_tree/json_parser.hpp>
-#include <boost/thread/shared_mutex.hpp>
 
 #include <osquery/core.h>
 #include <osquery/database.h>
-#include <osquery/flags.h>
-#include <osquery/packs.h>
 #include <osquery/registry.h>
 #include <osquery/status.h>
 
 namespace osquery {
 
-/// The builder or invoker may change the default config plugin.
-DECLARE_string(config_plugin);
-
+class Pack;
+class Schedule;
 class ConfigParserPlugin;
 
 /**
- * @brief The backing store key name for the executing query.
- *
- * The config maintains schedule statistics and tracks failed executions.
- * On process or worker resume an initializer or config may check if the
- * resume was the result of a failure during an executing query.
- */
-extern const std::string kExecutingQuery;
-
-/**
- * The schedule is an iterable collection of Packs. When you iterate through
- * a schedule, you only get the packs that should be running on the host that
- * you're currently operating on.
- */
-class Schedule {
- public:
-  /// Under the hood, the schedule is just a list of the Pack objects
-  typedef std::list<Pack> container;
-
-  /**
-   * @brief this class' iteration function
-   *
-   * Our step operation will be called on each element in packs_. It is
-   * responsible for determining if that element should be returned as the
-   * next iterator element or skipped.
-   */
-  struct Step {
-    bool operator()(Pack& pack) { return pack.shouldPackExecute(); }
-  };
-
-  /// Boost gives us a nice template for maintaining the state of the iterator
-  typedef boost::filter_iterator<Step, container::iterator> iterator;
-
-  /// Add a pack to the schedule
-  void add(const Pack& pack) {
-    remove(pack.getName(), pack.getSource());
-    packs_.push_back(pack);
-  }
-
-  /// Remove a pack, by name.
-  void remove(const std::string& pack) { remove(pack, ""); }
-
-  void remove(const std::string& pack, const std::string& source) {
-    packs_.remove_if([pack, source](Pack& p) {
-      return (p.getName() == pack) && (p.getSource() == source);
-    });
-  }
-
-  iterator begin() { return iterator(packs_.begin(), packs_.end()); }
-  iterator end() { return iterator(packs_.end(), packs_.end()); }
-
- private:
-  /// Underlying storage for the packs
-  container packs_;
-  friend class Config;
-};
-
-/**
- * @brief The programatic representation of osquery's configuration
+ * @brief The programmatic representation of osquery's configuration
  *
  * @code{.cpp}
  *   auto c = Config::getInstance();
  *   // use methods in osquery::Config on `c`
  * @endcode
  */
-class Config {
+class Config : private boost::noncopyable {
  private:
-  Config() : schedule_(Schedule()), valid_(false){};
+  Config();
 
  public:
   /// Get a singleton instance of the Config class
@@ -111,40 +49,12 @@ class Config {
   };
 
   /**
-   * @brief Call the genConfig method of the config retriever plugin.
-   *
-   * This may perform a resource load such as TCP request or filesystem read.
-   */
-  Status load();
-
-  /**
    * @brief Update the internal config data.
    *
    * @param config A map of domain or namespace to config data.
    * @return If the config changes were applied.
    */
   Status update(const std::map<std::string, std::string>& config);
-
-  /**
-   * @brief Drain the entire schedule
-   *
-   * This is called whenever the config is re-loaded
-   */
-  void clearSchedule();
-
-  /**
-   * @brief Drain the file data
-   *
-   * This is called whenever the config is re-loaded
-   */
-  void clearFiles();
-
-  /**
-   * @brief Expire the string cache of the hash
-   *
-   * This is called whenever the config is re-loaded
-   */
-  void clearHash();
 
   /**
    * @brief Record performance (monitoring) information about a scheduled query.
@@ -199,13 +109,18 @@ class Config {
    */
   void hashSource(const std::string& source, const std::string& content);
 
-  /// Whether or not the last loaded config was valid
-  bool isValid();
+  /// Whether or not the last loaded config was valid.
+  bool isValid() const { return valid_; }
+
+  /// Get start time of config.
+  size_t getStartTime() const { return start_time_; }
 
   /**
    * @brief Add a pack to the osquery schedule
    */
-  void addPack(const Pack& pack);
+  void addPack(const std::string& name,
+               const std::string& source,
+               const boost::property_tree::ptree& tree);
 
   /**
    * @brief Remove a pack from the osquery schedule
@@ -223,7 +138,12 @@ class Config {
    * @param category is the category which the file exists in
    * @param path is the file path to add
    */
-  void addFile(const std::string& category, const std::string& path);
+  void addFile(const std::string& source,
+               const std::string& category,
+               const std::string& path);
+
+  /// Remove files by source.
+  void removeFiles(const std::string& source);
 
   /**
    * @brief Map a function across the set of scheduled queries
@@ -297,22 +217,68 @@ class Config {
       const std::string& parser);
 
  protected:
-  Schedule schedule_;
+  /**
+   * @brief Call the genConfig method of the config retriever plugin.
+   *
+   * This may perform a resource load such as TCP request or filesystem read.
+   */
+  Status load();
+
+  /// A step method for Config::update.
+  Status updateSource(const std::string& name, const std::string& json);
+
+  /**
+   * @brief When config sources are updated the config will 'purge'.
+   *
+   * The general 'purge' action applies to searching for outdated query results,
+   * timestamps, saved intervals, etc. This event only occurs before a source
+   * is updated. Since updating the configuration may have expected side effects
+   * such as changing watched files or overwriting (modifying) pack content,
+   * this 'purge' action is assumed to be destructive and potentially expensive.
+   */
+  void purge();
+
+ protected:
+  /// Schedule of packs and their queries.
+  std::shared_ptr<Schedule> schedule_;
+
+  /// A set of performance stats for each query in the schedule.
   std::map<std::string, QueryPerformance> performance_;
-  std::map<std::string, std::vector<std::string> > files_;
+
+  /// A set of named categories filled with filesystem globbing paths.
+  using FileCategories = std::map<std::string, std::vector<std::string> >;
+  std::map<std::string, FileCategories> files_;
+
+  /// A set of hashes for each source of the config.
   std::map<std::string, std::string> hash_;
-  bool valid_;
+
+  /// Check if the config received valid/parsable content from a config plugin.
+  bool valid_{false};
+
+  /// Check if the config is updating sources in response to an async update
+  /// or the initialization load step.
+  bool loaded_{false};
+
+  /// A UNIX timestamp recorded when the config started.
+  size_t start_time_{0};
 
  private:
+  friend class Initializer;
+
+ private:
+  FRIEND_TEST(ConfigTests, test_plugin_reconfigure);
   FRIEND_TEST(ConfigTests, test_parse);
   FRIEND_TEST(ConfigTests, test_remove);
   FRIEND_TEST(ConfigTests, test_get_scheduled_queries);
   FRIEND_TEST(ConfigTests, test_get_parser);
   FRIEND_TEST(ConfigTests, test_add_remove_pack);
   FRIEND_TEST(ConfigTests, test_noninline_pack);
+
   FRIEND_TEST(OptionsConfigParserPluginTests, test_get_option);
   FRIEND_TEST(FilePathsConfigParserPluginTests, test_get_files);
   FRIEND_TEST(PacksTests, test_discovery_cache);
+  FRIEND_TEST(SchedulerTests, test_monitor);
+  FRIEND_TEST(SchedulerTests, test_config_results_purge);
 };
 
 /**
@@ -406,7 +372,7 @@ class ConfigPlugin : public Plugin {
                          std::string& pack);
 
   /// Main entrypoint for config plugin requests
-  Status call(const PluginRequest& request, PluginResponse& response);
+  Status call(const PluginRequest& request, PluginResponse& response) override;
 };
 
 /**
@@ -435,6 +401,9 @@ class ConfigPlugin : public Plugin {
  */
 class ConfigParserPlugin : public Plugin {
  public:
+  using ParserConfig = std::map<std::string, boost::property_tree::ptree>;
+
+ public:
   /**
    * @brief Return a list of top-level config keys to receive in updates.
    *
@@ -443,7 +412,7 @@ class ConfigParserPlugin : public Plugin {
    *
    * @return A list of string top-level JSON keys.
    */
-  virtual std::vector<std::string> keys() = 0;
+  virtual std::vector<std::string> keys() const = 0;
 
   /**
    * @brief Receive a merged property tree for each top-level config key.
@@ -456,12 +425,12 @@ class ConfigParserPlugin : public Plugin {
    * @param config A JSON-parsed property tree map.
    * @return Failure if the parser should no longer receive updates.
    */
-  virtual Status update(
-      const std::map<std::string, boost::property_tree::ptree>& config) = 0;
+  virtual Status update(const std::string& source,
+                        const ParserConfig& config) = 0;
 
-  Status setUp();
+  Status setUp() override;
 
-  boost::property_tree::ptree getData() { return data_; }
+  const boost::property_tree::ptree& getData() const { return data_; }
 
  protected:
   /// Allow the config parser to keep some global state.

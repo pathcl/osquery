@@ -36,7 +36,6 @@ function main_ubuntu() {
   package wget
   package unzip
   package build-essential
-  package bison
   package flex
   package devscripts
   package debhelper
@@ -97,13 +96,14 @@ function main_ubuntu() {
     install_libtool
     install_boost
   else
-    package clang-3.5
-    package clang-format-3.5
+    package clang-3.6
+    package clang-format-3.6
 
-    sudo ln -sf /usr/bin/clang-3.5 /usr/bin/clang
-    sudo ln -sf /usr/bin/clang++-3.5 /usr/bin/clang++
-    sudo ln -sf /usr/bin/clang-format-3.5 /usr/bin/clang-format
-    sudo ln -sf /usr/bin/llvm-config-3.5 /usr/bin/llvm-config
+    sudo ln -sf /usr/bin/clang-3.6 /usr/bin/clang
+    sudo ln -sf /usr/bin/clang++-3.6 /usr/bin/clang++
+    sudo ln -sf /usr/bin/clang-format-3.6 /usr/bin/clang-format
+    sudo ln -sf /usr/bin/llvm-config-3.6 /usr/bin/llvm-config
+    sudo ln -sf /usr/bin/llvm-symbolizer-3.6 /usr/bin/llvm-symbolizer
 
     package pkg-config
     package autoconf
@@ -132,6 +132,13 @@ function main_ubuntu() {
     gem_install fpm
   fi
 
+  if [[ $DISTRO = "lucid" ]]; then
+    install_openssl
+    install_bison
+  else
+    package bison
+  fi
+
   install_thrift
   install_rocksdb
   install_yara
@@ -142,9 +149,15 @@ function main_ubuntu() {
   package libgcrypt-dev
   package libdevmapper-dev
   install_libcryptsetup
-
   package libmagic-dev
+  install_sleuthkit
 
   # Audit facility (kautitd) and netlink APIs
   package libaudit-dev
+
+  if [[ $DISTRO = "lucid" ]]; then
+    package python-argparse
+    package python-jinja2
+    package python-psutil
+  fi
 }

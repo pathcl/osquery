@@ -11,6 +11,8 @@
 #include <osquery/logger.h>
 #include <osquery/tables/applications/browser_utils.h>
 
+#include "osquery/tables/system/system_utils.h"
+
 namespace osquery {
 namespace tables {
 
@@ -23,21 +25,22 @@ const std::map<std::string, std::string> kExtensionKeys = {
     {"default_locale", "locale"},
     {"update_url", "update_url"},
     {"author", "author"},
-    {"background.persistent", "persistent"},
-};
+    {"background.persistent", "persistent"}};
 
-void genExtension(const std::string& path, QueryData& results) {
+void genExtension(const std::string& uid,
+                  const std::string& path,
+                  QueryData& results) {
   std::string json_data;
-  if (!readFile(path + kManifestFile, json_data).ok()) {
+  if (!forensicReadFile(path + kManifestFile, json_data).ok()) {
     VLOG(1) << "Could not read file: " << path + kManifestFile;
     return;
   }
 
   // Read the extensions data into a JSON blob, then property tree.
   pt::ptree tree;
-  std::stringstream json_stream;
-  json_stream << json_data;
   try {
+    std::stringstream json_stream;
+    json_stream << json_data;
     pt::read_json(json_stream, tree);
   } catch (const pt::json_parser::json_parser_error& e) {
     VLOG(1) << "Could not parse JSON from: " << path + kManifestFile;
@@ -45,13 +48,10 @@ void genExtension(const std::string& path, QueryData& results) {
   }
 
   Row r;
+  r["uid"] = uid;
   // Most of the keys are in the top-level JSON dictionary.
   for (const auto& it : kExtensionKeys) {
-    try {
-      r[it.second] = tree.get<std::string>(it.first);
-    } catch (const pt::ptree_error& e) {
-      r[it.second] = "";
-    }
+    r[it.second] = tree.get<std::string>(it.first, "");
 
     // Convert JSON bool-types to an integer.
     if (r[it.second] == "true") {
@@ -66,38 +66,41 @@ void genExtension(const std::string& path, QueryData& results) {
     r["persistent"] = INTEGER(0);
   }
 
-  r["identifier"] = fs::path(path).parent_path().leaf().string();
+  r["identifier"] = fs::path(path).parent_path().parent_path().leaf().string();
   r["path"] = path;
   results.push_back(r);
 }
 
-QueryData genChromeBasedExtensions(QueryContext& context, const fs::path sub_dir) {
+QueryData genChromeBasedExtensions(QueryContext& context,
+                                   const fs::path& sub_dir) {
   QueryData results;
 
-  auto homes = osquery::getHomeDirectories();
-  for (const auto& home : homes) {
-    // For each user, enumerate all of their chrome profiles.
-    std::vector<std::string> profiles;
-    fs::path extension_path = home / sub_dir;
-    if (!resolveFilePattern(extension_path, profiles, GLOB_FOLDERS).ok()) {
-      continue;
-    }
+  auto users = usersFromContext(context);
+  for (const auto& row : users) {
+    if (row.count("uid") > 0 && row.count("directory") > 0) {
+      // For each user, enumerate all of their chrome profiles.
+      std::vector<std::string> profiles;
+      fs::path extension_path = row.at("directory") / sub_dir;
+      if (!resolveFilePattern(extension_path, profiles, GLOB_FOLDERS).ok()) {
+        continue;
+      }
 
-    // For each profile list each extension in the Extensions directory.
-    std::vector<std::string> extensions;
-    for (const auto& profile : profiles) {
-      listDirectoriesInDirectory(profile, extensions);
-    }
+      // For each profile list each extension in the Extensions directory.
+      std::vector<std::string> extensions;
+      for (const auto& profile : profiles) {
+        listDirectoriesInDirectory(profile, extensions);
+      }
 
-    // Generate an addons list from their extensions JSON.
-    std::vector<std::string> versions;
-    for (const auto& extension : extensions) {
-      listDirectoriesInDirectory(extension, versions);
-    }
+      // Generate an addons list from their extensions JSON.
+      std::vector<std::string> versions;
+      for (const auto& extension : extensions) {
+        listDirectoriesInDirectory(extension, versions);
+      }
 
-    // Extensions use /<EXTENSION>/<VERSION>/manifest.json.
-    for (const auto& version : versions) {
-      genExtension(version, results);
+      // Extensions use /<EXTENSION>/<VERSION>/manifest.json.
+      for (const auto& version : versions) {
+        genExtension(row.at("uid"), version, results);
+      }
     }
   }
 

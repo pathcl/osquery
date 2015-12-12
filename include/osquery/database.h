@@ -46,6 +46,9 @@ extern const std::string kEvents;
  */
 extern const std::string kLogs;
 
+/// An ordered list of column type names.
+extern const std::vector<std::string> kDomains;
+
 /////////////////////////////////////////////////////////////////////////////
 // Row
 /////////////////////////////////////////////////////////////////////////////
@@ -242,6 +245,9 @@ struct QueryPerformance {
   /// Number of executions.
   size_t executions;
 
+  /// Last UNIX time in seconds the query was executed successfully.
+  size_t last_executed;
+
   /// Total wall time taken
   unsigned long long int wall_time;
 
@@ -259,6 +265,7 @@ struct QueryPerformance {
 
   QueryPerformance()
       : executions(0),
+        last_executed(0),
         wall_time(0),
         user_time(0),
         system_time(0),
@@ -621,6 +628,9 @@ Status deleteDatabaseValue(const std::string& domain, const std::string& key);
 /// Get a list of keys for a given domain.
 Status scanDatabaseKeys(const std::string& domain,
                         std::vector<std::string>& keys);
+
+/// Allow callers to scan each column family and print each value.
+void dumpDatabase();
 
 /// Generate a specific-use registry for database access abstraction.
 CREATE_REGISTRY(DatabasePlugin, "database");

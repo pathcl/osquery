@@ -55,7 +55,7 @@ enum {
 /*
  * 8 best effort priority levels are supported
  */
-#define IOPRIO_BE_NR  (8)
+#define IOPRIO_BE_NR (8)
 
 enum {
   IOPRIO_WHO_PROCESS = 1,
@@ -148,12 +148,7 @@ void signalHandler(int signal) {
 
 namespace osquery {
 
-typedef std::chrono::high_resolution_clock chrono_clock;
-
-CLI_FLAG(bool,
-         config_check,
-         false,
-         "Check the format of an osquery config and exit");
+using chrono_clock = std::chrono::high_resolution_clock;
 
 #ifndef __APPLE__
 CLI_FLAG(bool, daemonize, false, "Run as daemon (osqueryd only)");
@@ -161,6 +156,9 @@ CLI_FLAG(bool, daemonize, false, "Run as daemon (osqueryd only)");
 
 DECLARE_string(distributed_plugin);
 DECLARE_bool(disable_distributed);
+DECLARE_string(config_plugin);
+DECLARE_bool(config_check);
+DECLARE_bool(database_dump);
 
 ToolType kToolType = OSQUERY_TOOL_UNKNOWN;
 
@@ -197,14 +195,14 @@ Initializer::Initializer(int& argc, char**& argv, ToolType tool)
     : argc_(&argc),
       argv_(&argv),
       tool_(tool),
-      binary_(fs::path(std::string(argv[0])).filename().string()) {
+      binary_((tool == OSQUERY_TOOL_DAEMON) ? "osqueryd" : "osqueryi") {
   std::srand(chrono_clock::now().time_since_epoch().count());
 
   // Handled boost filesystem locale problems fixes in 1.56.
   // See issue #1559 for the discussion and upstream boost patch.
   try {
     boost::filesystem::path::codecvt();
-  } catch(std::runtime_error &e) {
+  } catch (const std::runtime_error& e) {
     setenv("LC_ALL", "C", 1);
   }
 
@@ -275,8 +273,7 @@ Initializer::Initializer(int& argc, char**& argv, ToolType tool)
   initStatusLogger(binary_);
   if (tool != OSQUERY_EXTENSION) {
     if (isWorker()) {
-      VLOG(1) << "osquery worker initialized [watcher="
-              << getenv("OSQUERY_WORKER") << "]";
+      VLOG(1) << "osquery worker initialized [watcher=" << getppid() << "]";
     } else {
       VLOG(1) << "osquery initialized [version=" << kVersion << "]";
     }
@@ -417,9 +414,12 @@ void Initializer::start() {
     FLAGS_disable_extensions = true;
   }
 
-  // Check the backing store by allocating and exiting on error.
+  // A daemon must always have R/W access to the database.
+  DBHandle::setAllowOpen(true);
+  DBHandle::setRequireWrite(tool_ == OSQUERY_TOOL_DAEMON);
   if (!DBHandle::checkDB()) {
-    LOG(ERROR) << binary_ << " initialize failed: Could not open RocksDB";
+    LOG(ERROR) << RLOG(1629) << binary_
+               << " initialize failed: Could not open RocksDB";
     if (isWorker()) {
       ::exit(EXIT_CATASTROPHIC);
     } else {
@@ -446,6 +446,11 @@ void Initializer::start() {
     ::exit(s.getCode());
   }
 
+  if (FLAGS_database_dump) {
+    dumpDatabase();
+    ::exit(EXIT_SUCCESS);
+  }
+
   // Load the osquery config using the default/active config plugin.
   auto s = Config::getInstance().load();
   if (!s.ok()) {
@@ -455,14 +460,6 @@ void Initializer::start() {
     } else {
       LOG(INFO) << message;
     }
-  }
-
-  // Check if any queries were executing when the tool last stopped.
-  std::string failed_query;
-  getDatabaseValue(kPersistentSettings, kExecutingQuery, failed_query);
-  if (!failed_query.empty()) {
-    LOG(WARNING) << "Scheduled query may have failed: " << failed_query;
-    setDatabaseValue(kPersistentSettings, kExecutingQuery, "");
   }
 
   // Initialize the status and result plugin logger.

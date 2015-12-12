@@ -21,40 +21,50 @@ namespace osquery {
  */
 class FilePathsConfigParserPlugin : public ConfigParserPlugin {
  public:
-  std::vector<std::string> keys() { return {"file_paths"}; }
+  FilePathsConfigParserPlugin();
 
-  Status setUp() {
-    data_.put_child("file_paths", pt::ptree());
-    return Status(0, "OK");
+  std::vector<std::string> keys() const override {
+    return {"file_paths", "file_accesses"};
   }
 
-  Status update(const std::map<std::string, pt::ptree>& config) {
-    if (config.count("file_paths") > 0) {
-      data_ = pt::ptree();
-      data_.put_child("file_paths", config.at("file_paths"));
-    }
+  Status setUp() override { return Status(0); };
 
-    const auto& file_paths = data_.get_child("file_paths");
-    for (const std::pair<std::string, pt::ptree>& category : file_paths) {
-      for (const std::pair<std::string, pt::ptree>& path : category.second) {
-        std::string pattern;
-        try {
-          pattern = path.second.get_value<std::string>();
-        } catch (const pt::ptree_error& e) {
-          LOG(ERROR) << "Error reading the file_paths list: " << e.what();
-          continue;
-        }
-        if (pattern.empty()) {
-          continue;
-        }
-        replaceGlobWildcards(pattern);
-        Config::getInstance().addFile(category.first, pattern);
-      }
-    }
-
-    return Status(0, "OK");
-  }
+  Status update(const std::string& source, const ParserConfig& config) override;
 };
+
+FilePathsConfigParserPlugin::FilePathsConfigParserPlugin() {
+  data_.put_child("file_paths", pt::ptree());
+  data_.put_child("file_accesses", pt::ptree());
+}
+
+Status FilePathsConfigParserPlugin::update(const std::string& source,
+                                           const ParserConfig& config) {
+  if (config.count("file_paths") > 0) {
+    data_.put_child("file_paths", config.at("file_paths"));
+  }
+
+  auto& accesses = data_.get_child("file_accesses");
+  if (config.count("file_accesses") > 0) {
+    for (const auto& category : config.at("file_accesses")) {
+      auto path = category.second.get_value<std::string>("");
+      accesses.put(path, source);
+    }
+  }
+
+  Config::getInstance().removeFiles(source);
+  for (const auto& category : data_.get_child("file_paths")) {
+    for (const auto& path : category.second) {
+      auto pattern = path.second.get_value<std::string>("");
+      if (pattern.empty()) {
+        continue;
+      }
+      replaceGlobWildcards(pattern);
+      Config::getInstance().addFile(source, category.first, pattern);
+    }
+  }
+
+  return Status(0, "OK");
+}
 
 REGISTER_INTERNAL(FilePathsConfigParserPlugin, "config_parser", "file_paths");
 }

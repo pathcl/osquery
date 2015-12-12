@@ -45,13 +45,7 @@ TEST_F(SQLiteUtilTests, test_simple_query_execution) {
   // Access to the internal SQL implementation is only available in core.
   auto sql = SQL("SELECT * FROM time");
   EXPECT_TRUE(sql.ok());
-  EXPECT_EQ(sql.rows().size(), 1);
-}
-
-TEST_F(SQLiteUtilTests, test_get_tables) {
-  // Access to the internal SQL implementation is only available in core.
-  auto tables = SQL::getTableNames();
-  EXPECT_TRUE(tables.size() > 0);
+  EXPECT_EQ(sql.rows().size(), 1U);
 }
 
 TEST_F(SQLiteUtilTests, test_sqlite_instance_manager) {
@@ -121,23 +115,84 @@ TEST_F(SQLiteUtilTests, test_get_query_columns) {
   std::string query = "SELECT seconds, version FROM time JOIN osquery_info";
   auto status = getQueryColumnsInternal(query, results, dbc.db());
   ASSERT_TRUE(status.ok());
-  ASSERT_EQ(2, results.size());
-  EXPECT_EQ(std::make_pair(std::string("seconds"), std::string("INTEGER")),
-            results[0]);
-  EXPECT_EQ(std::make_pair(std::string("version"), std::string("TEXT")),
-            results[1]);
-
-  query = "SELECT hour + 1 AS hour1, minutes + 1 FROM time";
-  status = getQueryColumnsInternal(query, results, dbc.db());
-  ASSERT_TRUE(status.ok());
-  ASSERT_EQ(2, results.size());
-  EXPECT_EQ(std::make_pair(std::string("hour1"), std::string("UNKNOWN")),
-            results[0]);
-  EXPECT_EQ(std::make_pair(std::string("minutes + 1"), std::string("UNKNOWN")),
-            results[1]);
+  ASSERT_EQ(2U, results.size());
+  EXPECT_EQ(std::make_pair(std::string("seconds"), INTEGER_TYPE), results[0]);
+  EXPECT_EQ(std::make_pair(std::string("version"), TEXT_TYPE), results[1]);
 
   query = "SELECT * FROM foo";
   status = getQueryColumnsInternal(query, results, dbc.db());
   ASSERT_FALSE(status.ok());
+}
+
+std::vector<ColumnType> getTypes(const TableColumns& columns) {
+  std::vector<ColumnType> types;
+  for (const auto& col : columns) {
+    types.push_back(col.second);
+  }
+  return types;
+}
+
+TEST_F(SQLiteUtilTests, test_query_planner) {
+  using TypeList = std::vector<ColumnType>;
+
+  auto dbc = getTestDBC();
+  TableColumns columns;
+
+  std::string query = "select path, path from file";
+  getQueryColumnsInternal(query, columns, dbc.db());
+  EXPECT_EQ(getTypes(columns), TypeList({TEXT_TYPE, TEXT_TYPE}));
+
+  query = "select path, seconds from file, time";
+  getQueryColumnsInternal(query, columns, dbc.db());
+  EXPECT_EQ(getTypes(columns), TypeList({TEXT_TYPE, INTEGER_TYPE}));
+
+  query = "select path || path from file";
+  getQueryColumnsInternal(query, columns, dbc.db());
+  EXPECT_EQ(getTypes(columns), TypeList({TEXT_TYPE}));
+
+  query = "select seconds, path || path from file, time";
+  getQueryColumnsInternal(query, columns, dbc.db());
+  EXPECT_EQ(getTypes(columns), TypeList({INTEGER_TYPE, TEXT_TYPE}));
+
+  query = "select seconds, seconds from time";
+  getQueryColumnsInternal(query, columns, dbc.db());
+  EXPECT_EQ(getTypes(columns), TypeList({INTEGER_TYPE, INTEGER_TYPE}));
+
+  query = "select count(*) from time";
+  getQueryColumnsInternal(query, columns, dbc.db());
+  EXPECT_EQ(getTypes(columns), TypeList({BIGINT_TYPE}));
+
+  query = "select count(*), count(seconds), seconds from time";
+  getQueryColumnsInternal(query, columns, dbc.db());
+  EXPECT_EQ(getTypes(columns),
+            TypeList({BIGINT_TYPE, BIGINT_TYPE, INTEGER_TYPE}));
+
+  query = "select 1, 'path', path from file";
+  getQueryColumnsInternal(query, columns, dbc.db());
+  EXPECT_EQ(getTypes(columns), TypeList({INTEGER_TYPE, TEXT_TYPE, TEXT_TYPE}));
+
+  query = "select weekday, day, count(*), seconds from time";
+  getQueryColumnsInternal(query, columns, dbc.db());
+  EXPECT_EQ(getTypes(columns),
+            TypeList({TEXT_TYPE, INTEGER_TYPE, BIGINT_TYPE, INTEGER_TYPE}));
+
+  query = "select seconds + 1 from time";
+  getQueryColumnsInternal(query, columns, dbc.db());
+  EXPECT_EQ(getTypes(columns), TypeList({BIGINT_TYPE}));
+
+  query = "select seconds * seconds from time";
+  getQueryColumnsInternal(query, columns, dbc.db());
+  EXPECT_EQ(getTypes(columns), TypeList({BIGINT_TYPE}));
+
+  query = "select seconds > 1, seconds, count(seconds) from time";
+  getQueryColumnsInternal(query, columns, dbc.db());
+  EXPECT_EQ(getTypes(columns),
+            TypeList({INTEGER_TYPE, INTEGER_TYPE, BIGINT_TYPE}));
+
+  query =
+      "select f1.*, seconds, f2.directory from (select path || path from file) "
+      "f1, file as f2, time";
+  getQueryColumnsInternal(query, columns, dbc.db());
+  EXPECT_EQ(getTypes(columns), TypeList({TEXT_TYPE, INTEGER_TYPE, TEXT_TYPE}));
 }
 }

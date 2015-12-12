@@ -9,7 +9,7 @@ if(APPLE)
     ${OSQUERY_DARWIN_TABLES}
   )
 
-  file(GLOB OSQUERY_DARWIN_TABLES_TESTS "*/darwin/tests/*.cpp")
+  file(GLOB OSQUERY_DARWIN_TABLES_TESTS "*/darwin/tests/*.cpp" "*/darwin/tests/*.mm")
   ADD_OSQUERY_TABLE_TEST(${OSQUERY_DARWIN_TABLES_TESTS})
 
   ADD_OSQUERY_LINK_ADDITIONAL("-framework CoreFoundation")
@@ -19,6 +19,7 @@ if(APPLE)
 
   ADD_OSQUERY_LINK_ADDITIONAL("archive")
   ADD_OSQUERY_LINK_ADDITIONAL("magic")
+  ADD_OSQUERY_LINK_ADDITIONAL("tsk")
 elseif(FREEBSD)
   file(GLOB OSQUERY_FREEBSD_TABLES "*/freebsd/*.cpp")
   ADD_OSQUERY_LIBRARY_ADDITIONAL(osquery_tables_freebsd
@@ -32,6 +33,7 @@ elseif(FREEBSD)
   ADD_OSQUERY_LINK_ADDITIONAL("util")
   ADD_OSQUERY_LINK_ADDITIONAL("kvm")
   ADD_OSQUERY_LINK_ADDITIONAL("elf")
+  ADD_OSQUERY_LINK_ADDITIONAL("magic")
 else()
   file(GLOB OSQUERY_LINUX_TABLES "*/linux/*.cpp")
   ADD_OSQUERY_LIBRARY_ADDITIONAL(osquery_tables_linux
@@ -56,6 +58,11 @@ else()
       ${OSQUERY_UBUNTU_TABLES}
     )
 
+	# libdpkg API is volitile and suffers breaking changes. We need to find and pass in the libdpkg
+	# version via pkg-config
+	find_package(Libdpkg REQUIRED)
+	add_definitions(-DLIBDPKG_VERSION=${LIBDPKG_VERSION_NUMBER})
+
     ADD_OSQUERY_LINK_ADDITIONAL("apt-pkg dpkg")
   endif()
 
@@ -64,18 +71,24 @@ else()
   ADD_OSQUERY_LINK_ADDITIONAL("libuuid.so")
   ADD_OSQUERY_LINK_ADDITIONAL("ip4tc")
   ADD_OSQUERY_LINK_ADDITIONAL("libmagic.so")
+  ADD_OSQUERY_LINK_ADDITIONAL("tsk")
 endif()
-
 
 file(GLOB OSQUERY_CROSS_APPLICATIONS_TABLES "applications/*.cpp")
 file(GLOB OSQUERY_CROSS_SYSTEM_TABLES "system/*.cpp")
 file(GLOB OSQUERY_CROSS_NETWORKING_TABLES "networking/*.cpp")
-file(GLOB OSQUERY_CROSS_EVENTS_TABLES "events/*.cpp")
+file(GLOB OSQUERY_CROSS_FORENSIC_TABLES "forensic/*.cpp")
+if(APPLE OR LINUX)
+  file(GLOB OSQUERY_CROSS_EVENTS_TABLES "events/*.cpp")
+else()
+  set(OSQUERY_CROSS_EVENTS_TABLES "")
+endif()
 ADD_OSQUERY_LIBRARY_ADDITIONAL(osquery_tables
   ${OSQUERY_CROSS_APPLICATIONS_TABLES}
   ${OSQUERY_CROSS_SYSTEM_TABLES}
   ${OSQUERY_CROSS_NETWORKING_TABLES}
   ${OSQUERY_CROSS_EVENTS_TABLES}
+  ${OSQUERY_CROSS_FORENSIC_TABLES}
 )
 
 file(GLOB OSQUERY_CROSS_TABLES_TESTS "[!uo]*/tests/*/*.cpp")

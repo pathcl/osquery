@@ -34,7 +34,7 @@ QueryData parseEtcHostsContent(const std::string& content) {
     r["address"] = line[0];
     if (line.size() > 1) {
       std::vector<std::string> hostnames;
-      for (int i = 1; i < line.size(); ++i) {
+      for (size_t i = 1; i < line.size(); ++i) {
         if (boost::starts_with(line[i], "#")) {
           break;
         }
@@ -50,7 +50,7 @@ QueryData parseEtcHostsContent(const std::string& content) {
 
 QueryData genEtcHosts(QueryContext& context) {
   std::string content;
-  auto s = osquery::readFile("/etc/hosts", content);
+  auto s = osquery::forensicReadFile("/etc/hosts", content);
   if (s.ok()) {
     return parseEtcHostsContent(content);
   } else {

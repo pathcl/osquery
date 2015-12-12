@@ -15,9 +15,9 @@
 #include <osquery/config.h>
 #include <osquery/logger.h>
 #include <osquery/tables.h>
-#include <osquery/hash.h>
 
 #include "osquery/events/linux/inotify.h"
+#include "osquery/tables/events/event_utils.h"
 
 namespace osquery {
 
@@ -26,10 +26,15 @@ namespace osquery {
  *
  * This is mostly an example EventSubscriber implementation.
  */
-class FileEventSubscriber
-    : public EventSubscriber<INotifyEventPublisher> {
+class FileEventSubscriber : public EventSubscriber<INotifyEventPublisher> {
  public:
-  Status init();
+  Status init() override {
+    configure();
+    return Status(0);
+  }
+
+  /// Walk the configuration's file paths, create subscriptions.
+  void configure() override;
 
   /**
    * @brief This exports a single Callback for INotifyEventPublisher events.
@@ -39,7 +44,7 @@ class FileEventSubscriber
    *
    * @return Was the callback successful.
    */
-  Status Callback(const INotifyEventContextRef& ec, const void* user_data);
+  Status Callback(const ECRef& ec, const SCRef& sc);
 };
 
 /**
@@ -51,46 +56,48 @@ class FileEventSubscriber
  */
 REGISTER(FileEventSubscriber, "event_subscriber", "file_events");
 
-Status FileEventSubscriber::init() {
-  Config::getInstance().files([this](const std::string& category,
-                                     const std::vector<std::string>& files) {
+void FileEventSubscriber::configure() {
+  // Clear all monitors from INotify.
+  // There may be a better way to find the set intersection/difference.
+  auto pub = getPublisher();
+  pub->removeSubscriptions();
+
+  auto parser = Config::getParser("file_paths");
+  auto& accesses = parser->getData().get_child("file_accesses");
+  Config::getInstance().files([this, &accesses](
+      const std::string& category, const std::vector<std::string>& files) {
     for (const auto& file : files) {
-      VLOG(1) << "Added listener to: " << file;
-      auto mc = createSubscriptionContext();
+      VLOG(1) << "Added file event listener to: " << file;
+      auto sc = createSubscriptionContext();
       // Use the filesystem globbing pattern to determine recursiveness.
-      mc->recursive = 0;
-      mc->path = file;
-      mc->mask = IN_ATTRIB | IN_MODIFY | IN_DELETE | IN_CREATE;
-      subscribe(&FileEventSubscriber::Callback, mc, (void*)(&category));
+      sc->recursive = 0;
+      sc->path = file;
+      sc->mask = (accesses.count(category) > 0) ? IN_ALL_EVENTS
+                                                : (IN_ALL_EVENTS ^ IN_ACCESS);
+      sc->category = category;
+      subscribe(&FileEventSubscriber::Callback, sc);
     }
   });
-
-  return Status(0, "OK");
 }
 
-Status FileEventSubscriber::Callback(const INotifyEventContextRef& ec,
-                                            const void* user_data) {
+Status FileEventSubscriber::Callback(const ECRef& ec, const SCRef& sc) {
+  if (ec->action.empty()) {
+    return Status(0);
+  }
+
   Row r;
   r["action"] = ec->action;
   r["target_path"] = ec->path;
-  if (user_data != nullptr) {
-    r["category"] = *(std::string*)user_data;
-  } else {
-    r["category"] = "Undefined";
-  }
+  r["category"] = sc->category;
   r["transaction_id"] = INTEGER(ec->event->cookie);
 
-  if (ec->action == "CREATED" || ec->action == "UPDATED") {
-    r["md5"] = hashFromFile(HASH_TYPE_MD5, ec->path);
-    r["sha1"] = hashFromFile(HASH_TYPE_SHA1, ec->path);
-    r["sha256"] = hashFromFile(HASH_TYPE_SHA256, ec->path);
-  }
+  // Add hashing and 'join' against the file table for stat-information.
+  decorateFileEvent(
+      ec->path, (ec->action == "CREATED" || ec->action == "UPDATED"), r);
 
-  if (ec->action != "" && ec->action != "OPENED") {
-    // A callback is somewhat useless unless it changes the EventSubscriber
-    // state or calls `add` to store a marked up event.
-    add(r, ec->time);
-  }
+  // A callback is somewhat useless unless it changes the EventSubscriber
+  // state or calls `add` to store a marked up event.
+  add(r, ec->time);
   return Status(0, "OK");
 }
 }
