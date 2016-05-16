@@ -431,7 +431,11 @@ class TimeoutRunner(object):
 
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 =======
+=======
+
+>>>>>>> 9c01d4a6e348a53b30e9aa8ea256e80918d1cea9
 =======
 
 >>>>>>> 9c01d4a6e348a53b30e9aa8ea256e80918d1cea9
@@ -460,6 +464,7 @@ def flaky(gen):
         raise exceptions[0][0]
     return wrapper
 >>>>>>> 769a723b5ccb97037b678a874480f37beb2281c6
+
 
 
 class Tester(object):

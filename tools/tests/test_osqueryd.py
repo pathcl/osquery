@@ -55,9 +55,13 @@ class DaemonTests(test_base.ProcessGenerator, unittest.TestCase):
         daemon.kill()
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 
 =======
     
+=======
+
+>>>>>>> 9c01d4a6e348a53b30e9aa8ea256e80918d1cea9
 =======
 
 >>>>>>> 9c01d4a6e348a53b30e9aa8ea256e80918d1cea9

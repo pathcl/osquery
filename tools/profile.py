@@ -327,10 +327,14 @@ if __name__ == "__main__":
             profile1 = json.loads(fh.read())
 
 <<<<<<< HEAD
+<<<<<<< HEAD
     if not os.path.exists(args.shell):
 <<<<<<< HEAD
         print("Cannot find --daemon: %s" % (args.shell))
 =======
+=======
+    if not args.force and not os.path.exists(args.shell):
+>>>>>>> 9c01d4a6e348a53b30e9aa8ea256e80918d1cea9
 =======
     if not args.force and not os.path.exists(args.shell):
 >>>>>>> 9c01d4a6e348a53b30e9aa8ea256e80918d1cea9
