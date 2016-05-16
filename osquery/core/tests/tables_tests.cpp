@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -108,10 +108,8 @@ TEST_F(TablesTests, test_constraint_matching) {
 
 TEST_F(TablesTests, test_constraint_map) {
   ConstraintMap cm;
-  ConstraintList cl;
 
-  cl.add(Constraint(EQUALS, "some"));
-  cm["path"] = cl;
+  cm["path"].add(Constraint(EQUALS, "some"));
 
   // If a constraint list exists for a map key, normal constraints apply.
   EXPECT_TRUE(cm["path"].matches("some"));

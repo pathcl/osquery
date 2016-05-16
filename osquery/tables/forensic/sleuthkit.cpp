@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -29,18 +29,15 @@ namespace osquery {
 namespace tables {
 
 const std::map<TSK_FS_META_TYPE_ENUM, std::string> kTSKTypeNames{
-    {TSK_FS_META_TYPE_REG, "regular"},
-    {TSK_FS_META_TYPE_DIR, "directory"},
-    {TSK_FS_META_TYPE_LNK, "symlink"},
-    {TSK_FS_META_TYPE_BLK, "block"},
-    {TSK_FS_META_TYPE_CHR, "character"},
-    {TSK_FS_META_TYPE_FIFO, "fifo"},
+    {TSK_FS_META_TYPE_REG, "regular"},   {TSK_FS_META_TYPE_DIR, "directory"},
+    {TSK_FS_META_TYPE_LNK, "symlink"},   {TSK_FS_META_TYPE_BLK, "block"},
+    {TSK_FS_META_TYPE_CHR, "character"}, {TSK_FS_META_TYPE_FIFO, "fifo"},
     {TSK_FS_META_TYPE_SOCK, "socket"},
 };
 
 class DeviceHelper : private boost::noncopyable {
  public:
-  DeviceHelper(const std::string& device_path)
+  explicit DeviceHelper(const std::string& device_path)
       : image_(std::make_shared<TskImgInfo>()),
         volume_(std::make_shared<TskVsInfo>()),
         device_path_(device_path) {}
@@ -55,6 +52,7 @@ class DeviceHelper : private boost::noncopyable {
           continue;
         }
         predicate(part);
+        delete part;
       }
     }
   }
@@ -85,6 +83,7 @@ class DeviceHelper : private boost::noncopyable {
   /// Reset stack counting for directory iteration.
   void resetStack() {
     stack_ = 0;
+    count_ = 0;
     std::set<std::string>().swap(loops_);
   }
 
@@ -109,6 +108,7 @@ class DeviceHelper : private boost::noncopyable {
   std::string device_path_;
 
   size_t stack_{0};
+  size_t count_{0};
   std::set<std::string> loops_;
 };
 
@@ -213,6 +213,10 @@ void DeviceHelper::generateFiles(const std::string& partition,
   // Iterate through the directory.
   std::map<TSK_INUM_T, std::string> additional;
   for (size_t i = 0; i < dir->getSize(); i++) {
+    if (count_++ > 1024 * 10) {
+      break;
+    }
+
     auto* file = dir->getFile(i);
     if (file == nullptr) {
       continue;
@@ -269,10 +273,13 @@ MultiHashes hashInode(TskFsFile* file) {
 
   // Set a maximum 'chunk' or block size to 1 page or the file size.
   TSK_OFF_T size = meta->getSize();
-  auto buffer_size = (size < 4096) ? size : 4096;
+  if (size == 0) {
+    return MultiHashes();
+  }
 
   // Allocate some heap memory and iterate over reading a chunk and updating.
-  auto* buffer = (char*)malloc(buffer_size * sizeof(char*));
+  auto buffer_size = (size < 4096) ? size : 4096;
+  auto* buffer = (char*)malloc(buffer_size * sizeof(char));
   if (buffer != nullptr) {
     ssize_t chunk_size = 0;
     for (ssize_t offset = 0; offset < size; offset += chunk_size) {

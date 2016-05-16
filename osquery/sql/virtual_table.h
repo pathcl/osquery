@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -10,7 +10,7 @@
 
 #pragma once
 
-#include <deque>
+#include <boost/noncopyable.hpp>
 
 #include <osquery/tables.h>
 
@@ -20,39 +20,11 @@
 namespace osquery {
 
 /**
- * @brief osquery virtual table connection.
- *
- * This object is the SQLite database's virtual table context.
- * When the virtual table is created/connected the name and columns are
- * retrieved via the TablePlugin call API. The details are kept in this context
- * so column parsing and row walking does not require additional Registry calls.
- *
- * When tables are accessed as the result of an SQL statement a QueryContext is
- * created to represent metadata that can be used by the virtual table
- * implementation code. Thus the code that generates rows can choose to emit
- * additional data, restrict based on constraints, or potentially yield from
- * a cache or choose not to generate certain columns.
- */
-struct VirtualTableContent {
-  /// Friendly name for the table.
-  TableName name;
-  /// Table column structure, retrieved once via the TablePlugin call API.
-  TableColumns columns;
-  /// Transient set of virtual table access constraints.
-  std::deque<ConstraintSet> constraints;
-  /// Index into the list of constraints.
-  sqlite3_vtab_cursor *constraints_cursor{nullptr};
-  size_t constraints_index{0};
-  /// Last term successfully parsed by xBestIndex.
-  int current_term{-1};
-};
-
-/**
  * @brief osquery cursor object.
  *
  * Only used in the SQLite virtual table module methods.
  */
-struct BaseCursor {
+struct BaseCursor : private boost::noncopyable {
   /// SQLite virtual table cursor.
   sqlite3_vtab_cursor base;
   /// Track cursors for optional planner output.
@@ -71,19 +43,30 @@ struct BaseCursor {
  * Only used in the SQLite virtual table module methods.
  * This adds each table plugin class to the state tracking in SQLite.
  */
-struct VirtualTable {
+struct VirtualTable : private boost::noncopyable {
+  /// The SQLite-provided virtual table structure.
   sqlite3_vtab base;
+
+  /// Added structure: A content structure with metadata about the table.
   VirtualTableContent *content{nullptr};
+
+  /// Added structure: The thread-local DB instance associated with the query.
+  SQLiteDBInstance *instance{nullptr};
 };
 
 /// Attach a table plugin name to an in-memory SQLite database.
 Status attachTableInternal(const std::string &name,
                            const std::string &statement,
-                           sqlite3 *db);
+                           const SQLiteDBInstanceRef &instance);
 
 /// Detach (drop) a table.
 Status detachTableInternal(const std::string &name, sqlite3 *db);
 
+Status attachFunctionInternal(
+    const std::string &name,
+    std::function<
+        void(sqlite3_context *context, int argc, sqlite3_value **argv)> func);
+
 /// Attach all table plugins to an in-memory SQLite database.
-void attachVirtualTables(sqlite3 *db);
+void attachVirtualTables(const SQLiteDBInstanceRef &instance);
 }

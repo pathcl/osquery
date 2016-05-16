@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -62,8 +62,7 @@ REGISTER(FileEventSubscriber, "event_subscriber", "file_events");
 void FileEventSubscriber::configure() {
   // Clear all paths from FSEvents.
   // There may be a better way to find the set intersection/difference.
-  auto pub = getPublisher();
-  pub->removeSubscriptions();
+  removeSubscriptions();
 
   Config::getInstance().files([this](const std::string& category,
                                      const std::vector<std::string>& files) {

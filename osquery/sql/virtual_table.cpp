@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -8,6 +8,8 @@
  *
  */
 
+#include <atomic>
+
 #include <osquery/flags.h>
 #include <osquery/logger.h>
 
@@ -15,14 +17,45 @@
 
 namespace osquery {
 
+FLAG(bool, enable_foreign, false, "Enable noop foreign virtual tables");
+
 SHELL_FLAG(bool, planner, false, "Enable osquery runtime planner output");
+
+/**
+ * @brief A protection around concurrent table attach requests.
+ *
+ * Table attaching is not concurrent. Attaching is the only unprotected SQLite
+ * operation from osquery's usage perspective. The extensions API allows for
+ * concurrent access of non-thread-safe database resources for attaching table
+ * schema and filter routing instructions.
+ */
+Mutex kAttachMutex;
+
+/**
+ * A generated foreign amalgamation file includes schema for all tables.
+ *
+ * When the build system generates TablePlugin%s from the .table spec files, it
+ * reads the foreign-platform tables and generates an associated schema plugin.
+ * These plugins are amalgamated into 'foreign_amalgamation' and do not call
+ * their filter generation functions.
+ */
+void registerForeignTables();
 
 namespace tables {
 namespace sqlite {
 
-static size_t kPlannerCursorID = 0;
+/// For planner and debugging an incrementing cursor ID is used.
+static std::atomic<size_t> kPlannerCursorID{0};
 
-static std::string opString(unsigned char op) {
+/**
+ * @brief A next-ID for within-query constraints stacking.
+ *
+ * As constraints are evaluated within xBestIndex, an IDX is assigned for
+ * operator and operand retrieval during xFilter/scanning.
+ */
+static std::atomic<size_t> kConstraintIndexID{0};
+
+static inline std::string opString(unsigned char op) {
   switch (op) {
   case EQUALS:
     return "=";
@@ -34,6 +67,16 @@ static std::string opString(unsigned char op) {
     return "<";
   case GREATER_THAN_OR_EQUALS:
     return ">=";
+  case LIKE:
+    return "LIKE";
+  case MATCH:
+    return "MATCH";
+  case GLOB:
+    return "GLOB";
+  case REGEXP:
+    return "REGEX";
+  case UNIQUE:
+    return "UNIQUE";
   }
   return "?";
 }
@@ -62,19 +105,7 @@ int xOpen(sqlite3_vtab *tab, sqlite3_vtab_cursor **ppCursor) {
 
 int xClose(sqlite3_vtab_cursor *cur) {
   BaseCursor *pCur = (BaseCursor *)cur;
-  const auto *pVtab = (VirtualTable *)cur->pVtab;
   plan("Closing cursor (" + std::to_string(pCur->id) + ")");
-  if (pVtab != nullptr) {
-    // Reset all constraints for the virtual table content.
-    if (pVtab->content->constraints.size() > 0) {
-      // As each cursor is closed remove the potential constraints it used.
-      // Cursors without constraints (full scans) are kept open.
-      pVtab->content->constraints.pop_front();
-    }
-    pVtab->content->constraints_cursor = nullptr;
-    pVtab->content->constraints_index = 0;
-    pVtab->content->current_term = -1;
-  }
   delete pCur;
   return SQLITE_OK;
 }
@@ -122,6 +153,7 @@ int xCreate(sqlite3 *db,
 
   memset(pVtab, 0, sizeof(VirtualTable));
   pVtab->content = new VirtualTableContent;
+  pVtab->instance = (SQLiteDBInstance *)pAux;
 
   // Create a TablePlugin Registry call, expect column details as the response.
   PluginResponse response;
@@ -172,7 +204,11 @@ int xColumn(sqlite3_vtab_cursor *cur, sqlite3_context *ctx, int col) {
 
   // Attempt to cast each xFilter-populated row/column to the SQLite type.
   const auto &value = pCur->data[pCur->row][column_name];
-  if (type == TEXT_TYPE) {
+  if (pCur->data[pCur->row].count(column_name) == 0) {
+    // Missing content.
+    VLOG(1) << "Error " << column_name << " is empty";
+    sqlite3_result_null(ctx);
+  } else if (type == TEXT_TYPE) {
     sqlite3_result_text(ctx, value.c_str(), value.size(), SQLITE_STATIC);
   } else if (type == INTEGER_TYPE) {
     long afinite;
@@ -180,17 +216,19 @@ int xColumn(sqlite3_vtab_cursor *cur, sqlite3_context *ctx, int col) {
         afinite > INT_MAX) {
       VLOG(1) << "Error casting " << column_name << " (" << value
               << ") to INTEGER";
-      afinite = -1;
+      sqlite3_result_null(ctx);
+    } else {
+      sqlite3_result_int(ctx, (int)afinite);
     }
-    sqlite3_result_int(ctx, (int)afinite);
   } else if (type == BIGINT_TYPE || type == UNSIGNED_BIGINT_TYPE) {
     long long afinite;
     if (!safeStrtoll(value, 10, afinite)) {
       VLOG(1) << "Error casting " << column_name << " (" << value
               << ") to BIGINT";
-      afinite = -1;
+      sqlite3_result_null(ctx);
+    } else {
+      sqlite3_result_int64(ctx, afinite);
     }
-    sqlite3_result_int64(ctx, afinite);
   } else if (type == DOUBLE_TYPE) {
     char *end = nullptr;
     double afinite = strtod(value.c_str(), &end);
@@ -198,8 +236,10 @@ int xColumn(sqlite3_vtab_cursor *cur, sqlite3_context *ctx, int col) {
       afinite = 0;
       VLOG(1) << "Error casting " << column_name << " (" << value
               << ") to DOUBLE";
+      sqlite3_result_null(ctx);
+    } else {
+      sqlite3_result_double(ctx, afinite);
     }
-    sqlite3_result_double(ctx, afinite);
   } else {
     LOG(ERROR) << "Error unknown column type " << column_name;
   }
@@ -214,46 +254,60 @@ static int xBestIndex(sqlite3_vtab *tab, sqlite3_index_info *pIdxInfo) {
   // Expect this index to correspond with argv within xFilter.
   size_t expr_index = 0;
   // If any constraints are unusable increment the cost of the index.
-  size_t cost = 0;
+  double cost = 1;
   // Expressions operating on the same virtual table are loosely identified by
   // the consecutive sets of terms each of the constraint sets are applied onto.
   // Subsequent attempts from failed (unusable) constraints replace the set,
   // while new sets of terms append.
-  int term = -1;
   if (pIdxInfo->nConstraint > 0) {
     for (size_t i = 0; i < static_cast<size_t>(pIdxInfo->nConstraint); ++i) {
       // Record the term index (this index exists across all expressions).
-      term = pIdxInfo->aConstraint[i].iTermOffset;
-      if (!pIdxInfo->aConstraint[i].usable) {
+      const auto &constraint_info = pIdxInfo->aConstraint[i];
+#if defined(DEBUG)
+      plan("Evaluating constraints for table: " + pVtab->content->name +
+           " [index=" + std::to_string(i) + " column=" +
+           std::to_string(constraint_info.iColumn) + " term=" +
+           std::to_string((int)constraint_info.iTermOffset) + " usable=" +
+           std::to_string((int)constraint_info.usable) + "]");
+#endif
+      if (!constraint_info.usable) {
         // A higher cost less priority, prefer more usable query constraints.
         cost += 10;
         continue;
       }
+
       // Lookup the column name given an index into the table column set.
-      const auto &name =
-          pVtab->content->columns[pIdxInfo->aConstraint[i].iColumn].first;
+      if (constraint_info.iColumn < 0 ||
+          static_cast<size_t>(constraint_info.iColumn) >=
+              pVtab->content->columns.size()) {
+        cost += 10;
+        continue;
+      }
+      const auto &name = pVtab->content->columns[constraint_info.iColumn].first;
       // Save a pair of the name and the constraint operator.
       // Use this constraint during xFilter by performing a scan and column
       // name lookup through out all cursor constraint lists.
       constraints.push_back(
-          std::make_pair(name, Constraint(pIdxInfo->aConstraint[i].op)));
+          std::make_pair(name, Constraint(constraint_info.op)));
       pIdxInfo->aConstraintUsage[i].argvIndex = ++expr_index;
+#if defined(DEBUG)
+      plan("Adding constraint for table: " + pVtab->content->name +
+           " [column=" + name + " arg_index=" + std::to_string(expr_index) +
+           "]");
+#endif
     }
   }
 
-  // Set the estimated cost based on the number of unusable terms.
+  pIdxInfo->idxNum = kConstraintIndexID++;
+#if defined(DEBUG)
+  plan("Recording constraint set for table: " + pVtab->content->name +
+       " [cost=" + std::to_string(cost) + " size=" +
+       std::to_string(constraints.size()) + " idx=" +
+       std::to_string(pIdxInfo->idxNum) + "]");
+#endif
+  // Add the constraint set to the table's tracked constraints.
+  pVtab->content->constraints[pIdxInfo->idxNum] = std::move(constraints);
   pIdxInfo->estimatedCost = cost;
-  if (cost == 0 && term != -1) {
-    // This set of constraints is 100% usable.
-    // Add the constraint set to the table's tracked constraints.
-    pVtab->content->constraints.push_back(constraints);
-    pVtab->content->current_term = term;
-  } else {
-    // Failed.
-    if (term != -1 && term != pVtab->content->current_term) {
-      pVtab->content->current_term = term;
-    }
-  }
   return SQLITE_OK;
 }
 
@@ -265,10 +319,11 @@ static int xFilter(sqlite3_vtab_cursor *pVtabCursor,
   BaseCursor *pCur = (BaseCursor *)pVtabCursor;
   auto *pVtab = (VirtualTable *)pVtabCursor->pVtab;
   auto *content = pVtab->content;
+  pVtab->instance->addAffectedTable(content);
 
   pCur->row = 0;
   pCur->n = 0;
-  QueryContext context;
+  QueryContext context(content);
 
   for (size_t i = 0; i < content->columns.size(); ++i) {
     // Set the column affinity for each optional constraint list.
@@ -277,21 +332,17 @@ static int xFilter(sqlite3_vtab_cursor *pVtabCursor,
         content->columns[i].second;
   }
 
-  // Filtering between cursors happens iteratively, not consecutively.
-  // If there are multiple sets of constraints, they apply to each cursor.
-  if (content->constraints_cursor == nullptr) {
-    content->constraints_cursor = pVtabCursor;
-  } else if (content->constraints_cursor != pVtabCursor) {
-    content->constraints_index += 1;
-    if (content->constraints_index >= content->constraints.size()) {
-      content->constraints_index = 0;
-    }
-    content->constraints_cursor = pVtabCursor;
-  }
+// Filtering between cursors happens iteratively, not consecutively.
+// If there are multiple sets of constraints, they apply to each cursor.
+#if defined(DEBUG)
+  plan("Filtering called for table: " + content->name + " [constraint_count=" +
+       std::to_string(content->constraints.size()) + " argc=" +
+       std::to_string(argc) + " idx=" + std::to_string(idxNum) + "]");
+#endif
 
   // Iterate over every argument to xFilter, filling in constraint values.
   if (content->constraints.size() > 0) {
-    auto &constraints = content->constraints[content->constraints_index];
+    auto &constraints = content->constraints[idxNum];
     if (argc > 0) {
       for (size_t i = 0; i < static_cast<size_t>(argc); ++i) {
         auto expr = (const char *)sqlite3_value_text(argv[i]);
@@ -312,13 +363,12 @@ static int xFilter(sqlite3_vtab_cursor *pVtabCursor,
       // Constraints failed.
     }
   }
+
   // Reset the virtual table contents.
   pCur->data.clear();
   // Generate the row data set.
-  PluginRequest request = {{"action", "generate"}};
   plan("Scanning rows for cursor (" + std::to_string(pCur->id) + ")");
-  TablePlugin::setRequestFromContext(context, request);
-  Registry::call("table", pVtab->content->name, request, pCur->data);
+  Registry::callTable(pVtab->content->name, context, pCur->data);
 
   // Set the number of rows.
   pCur->n = pCur->data.size();
@@ -329,7 +379,7 @@ static int xFilter(sqlite3_vtab_cursor *pVtabCursor,
 
 Status attachTableInternal(const std::string &name,
                            const std::string &statement,
-                           sqlite3 *db) {
+                           const SQLiteDBInstanceRef &instance) {
   if (SQLiteDBManager::isDisabled(name)) {
     VLOG(1) << "Table " << name << " is disabled, not attaching";
     return Status(0, getStringForSQLiteReturnCode(0));
@@ -351,16 +401,28 @@ Status attachTableInternal(const std::string &name,
       tables::sqlite::xEof,
       tables::sqlite::xColumn,
       tables::sqlite::xRowid,
+      nullptr, /* Update */
+      nullptr, /* Begin */
+      nullptr, /* Sync */
+      nullptr, /* Commit */
+      nullptr, /* Rollback */
+      nullptr, /* FindFunction */
+      nullptr, /* Rename */
+      nullptr, /* Savepoint */
+      nullptr, /* Release */
+      nullptr, /* RollbackTo */
   };
   // clang-format on
 
   // Note, if the clientData API is used then this will save a registry call
   // within xCreate.
-  int rc = sqlite3_create_module(db, name.c_str(), &module, 0);
+  WriteLock lock(kAttachMutex);
+  int rc = sqlite3_create_module(
+      instance->db(), name.c_str(), &module, (void *)&(*instance));
   if (rc == SQLITE_OK || rc == SQLITE_MISUSE) {
     auto format =
         "CREATE VIRTUAL TABLE temp." + name + " USING " + name + statement;
-    rc = sqlite3_exec(db, format.c_str(), nullptr, nullptr, 0);
+    rc = sqlite3_exec(instance->db(), format.c_str(), nullptr, nullptr, 0);
   } else {
     LOG(ERROR) << "Error attaching table: " << name << " (" << rc << ")";
   }
@@ -368,6 +430,7 @@ Status attachTableInternal(const std::string &name,
 }
 
 Status detachTableInternal(const std::string &name, sqlite3 *db) {
+  WriteLock lock(kAttachMutex);
   auto format = "DROP TABLE IF EXISTS temp." + name;
   int rc = sqlite3_exec(db, format.c_str(), nullptr, nullptr, 0);
   if (rc != SQLITE_OK) {
@@ -377,7 +440,31 @@ Status detachTableInternal(const std::string &name, sqlite3 *db) {
   return Status(rc, getStringForSQLiteReturnCode(rc));
 }
 
-void attachVirtualTables(sqlite3 *db) {
+Status attachFunctionInternal(
+    const std::string &name,
+    std::function<
+        void(sqlite3_context *context, int argc, sqlite3_value **argv)> func) {
+  // Hold the manager connection instance again in callbacks.
+  auto dbc = SQLiteDBManager::get();
+  // Add some shell-specific functions to the instance.
+  WriteLock lock(kAttachMutex);
+  int rc = sqlite3_create_function(
+      dbc->db(),
+      name.c_str(),
+      0,
+      SQLITE_UTF8,
+      nullptr,
+      *func.target<void (*)(sqlite3_context *, int, sqlite3_value **)>(),
+      nullptr,
+      nullptr);
+  return Status(rc);
+}
+
+void attachVirtualTables(const SQLiteDBInstanceRef &instance) {
+  if (FLAGS_enable_foreign) {
+    registerForeignTables();
+  }
+
   PluginResponse response;
   for (const auto &name : Registry::names("table")) {
     // Column information is nice for virtual table create call.
@@ -385,7 +472,7 @@ void attachVirtualTables(sqlite3 *db) {
         Registry::call("table", name, {{"action", "columns"}}, response);
     if (status.ok()) {
       auto statement = columnDefinition(response);
-      attachTableInternal(name, statement, db);
+      attachTableInternal(name, statement, instance);
     }
   }
 }

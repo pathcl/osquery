@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -9,17 +9,17 @@
  */
 
 #include <exception>
-#include <mutex>
 
 #include <osquery/filesystem.h>
 #include <osquery/flags.h>
 #include <osquery/logger.h>
 
-namespace pt = boost::property_tree;
 namespace fs = boost::filesystem;
 
-// This is the mode that glog uses for logfiles.  Must be at the top level
-// (i.e. outside of the `osquery` namespace).
+/**
+ * This is the mode that Glog uses for logfiles.
+ * Must be at the top level (i.e. outside of the `osquery` namespace).
+ */
 DECLARE_int32(logfile_mode);
 
 namespace osquery {
@@ -28,33 +28,52 @@ FLAG(string,
      logger_path,
      "/var/log/osquery/",
      "Directory path for ERROR/WARN/INFO and results logging");
-
-FLAG(int32,
-     logger_mode,
-     0640,
-     "Mode for log files (default '0640')");
-
 /// Legacy, backward compatible "osquery_log_dir" CLI option.
 FLAG_ALIAS(std::string, osquery_log_dir, logger_path);
 
+FLAG(int32, logger_mode, 0640, "Decimal mode for log files (default '0640')");
+
 const std::string kFilesystemLoggerFilename = "osqueryd.results.log";
 const std::string kFilesystemLoggerSnapshots = "osqueryd.snapshots.log";
-const std::string kFilesystemLoggerHealth = "osqueryd.health.log";
-
-std::mutex filesystemLoggerPluginMutex;
 
 class FilesystemLoggerPlugin : public LoggerPlugin {
  public:
-  Status setUp();
-  Status logString(const std::string& s);
-  Status logStringToFile(const std::string& s, const std::string& filename);
-  Status logSnapshot(const std::string& s);
-  Status logHealth(const std::string& s);
-  Status init(const std::string& name, const std::vector<StatusLogLine>& log);
-  Status logStatus(const std::vector<StatusLogLine>& log);
+  Status setUp() override;
+
+  /// Log results (differential) to a distinct path.
+  Status logString(const std::string& s) override;
+
+  /// Log snapshot data to a distinct path.
+  Status logSnapshot(const std::string& s) override;
+
+  /**
+   * @brief Initialize the logger plugin after osquery has begun.
+   *
+   * The filesystem logger plugin is somewhat unique, it is the only logger
+   * that will return an error during initialization. This allows Glog to
+   * write directly to files.
+   */
+  void init(const std::string& name,
+            const std::vector<StatusLogLine>& log) override;
+
+  /// Write a status to Glog.
+  Status logStatus(const std::vector<StatusLogLine>& log) override;
 
  private:
+  /// The plugin-internal filesystem writer method.
+  Status logStringToFile(const std::string& s,
+                         const std::string& filename,
+                         bool empty = false);
+
+ private:
+  /// The folder where Glog and the result/snapshot files are written.
   fs::path log_path_;
+
+  /// Filesystem writer mutex.
+  Mutex mutex_;
+
+ private:
+  FRIEND_TEST(FilesystemLoggerTests, test_filesystem_init);
 };
 
 REGISTER(FilesystemLoggerPlugin, "logger", "filesystem");
@@ -62,16 +81,12 @@ REGISTER(FilesystemLoggerPlugin, "logger", "filesystem");
 Status FilesystemLoggerPlugin::setUp() {
   log_path_ = fs::path(FLAGS_logger_path);
 
-  // Ensure that the glog status logs use the same mode as our results log.
-  FLAGS_logfile_mode = FLAGS_logger_mode;
+  // Ensure that the Glog status logs use the same mode as our results log.
+  // Glog 0.3.4 does not support a logfile mode.
+  // FLAGS_logfile_mode = FLAGS_logger_mode;
 
   // Ensure that we create the results log here.
-  auto status = logString("");
-  if (!status.ok()) {
-    return status;
-  }
-
-  return Status(0, "OK");
+  return logStringToFile("", kFilesystemLoggerFilename, true);
 }
 
 Status FilesystemLoggerPlugin::logString(const std::string& s) {
@@ -79,26 +94,28 @@ Status FilesystemLoggerPlugin::logString(const std::string& s) {
 }
 
 Status FilesystemLoggerPlugin::logStringToFile(const std::string& s,
-                                               const std::string& filename) {
-  std::lock_guard<std::mutex> lock(filesystemLoggerPluginMutex);
+                                               const std::string& filename,
+                                               bool empty) {
+  WriteLock lock(mutex_);
+  Status status;
   try {
-    auto status = writeTextFile((log_path_ / filename).string(), s, FLAGS_logger_mode, true);
-    if (!status.ok()) {
-      return status;
-    }
+    status = writeTextFile((log_path_ / filename).string(),
+                           (empty) ? "" : s + '\n',
+                           FLAGS_logger_mode,
+                           true);
   } catch (const std::exception& e) {
     return Status(1, e.what());
   }
-  return Status(0, "OK");
+  return status;
 }
 
 Status FilesystemLoggerPlugin::logStatus(
     const std::vector<StatusLogLine>& log) {
   for (const auto& item : log) {
     // Emit this intermediate log to the Glog filesystem logger.
-    google::LogMessage(item.filename.c_str(),
-                       item.line,
-                       (google::LogSeverity)item.severity).stream()
+    google::LogMessage(
+        item.filename.c_str(), item.line, (google::LogSeverity)item.severity)
+            .stream()
         << item.message;
   }
 
@@ -110,12 +127,8 @@ Status FilesystemLoggerPlugin::logSnapshot(const std::string& s) {
   return logStringToFile(s, kFilesystemLoggerSnapshots);
 }
 
-Status FilesystemLoggerPlugin::logHealth(const std::string& s) {
-  return logStringToFile(s, kFilesystemLoggerHealth);
-}
-
-Status FilesystemLoggerPlugin::init(const std::string& name,
-                                    const std::vector<StatusLogLine>& log) {
+void FilesystemLoggerPlugin::init(const std::string& name,
+                                  const std::vector<StatusLogLine>& log) {
   // Stop the internal Glog facilities.
   google::ShutdownGoogleLogging();
 
@@ -150,13 +163,11 @@ Status FilesystemLoggerPlugin::init(const std::string& name,
   // Now funnel the intermediate status logs provided to `init`.
   logStatus(log);
 
+  // The filesystem logger cheats and uses Glog to log to the filesystem so
+  // we can return failure here and stop the custom log sink.
   // Restore settings for logging to stderr.
   FLAGS_logtostderr = log_to_stderr;
   FLAGS_alsologtostderr = also_log_to_stderr;
   FLAGS_stderrthreshold = stderr_threshold;
-
-  // The filesystem logger cheats and uses Glog to log to the filesystem so
-  // we can return failure here and stop the custom log sink.
-  return Status(1, "No status logger used for filesystem");
 }
 }

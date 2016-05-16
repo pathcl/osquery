@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -39,7 +39,7 @@ REGISTER(FilesystemConfigPlugin, "config", "filesystem");
 Status FilesystemConfigPlugin::genConfig(
     std::map<std::string, std::string>& config) {
   if (!fs::is_regular_file(FLAGS_config_path)) {
-    return Status(1, "config file does not exist");
+    return Status(1, "config file does not exist: " + FLAGS_config_path);
   }
 
   std::vector<std::string> conf_files;

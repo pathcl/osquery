@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -12,6 +12,7 @@
 
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
+
 #include <gtest/gtest.h>
 
 #include <osquery/core.h>
@@ -20,9 +21,6 @@
 #include <osquery/sql.h>
 
 #include "osquery/core/test_util.h"
-#include "osquery/remote/requests.h"
-#include "osquery/remote/serializers/json.h"
-#include "osquery/remote/transports/tls.h"
 
 #include "osquery/sql/sqlite_util.h"
 
@@ -30,7 +28,6 @@ namespace pt = boost::property_tree;
 
 DECLARE_string(distributed_tls_read_endpoint);
 DECLARE_string(distributed_tls_write_endpoint);
-DECLARE_string(enroll_tls_endpoint);
 
 namespace osquery {
 
@@ -38,13 +35,8 @@ class DistributedTests : public testing::Test {
  protected:
   void SetUp() {
     TLSServerRunner::start();
+    TLSServerRunner::setClientConfig();
     clearNodeKey();
-
-    tls_hostname_ = Flag::getValue("tls_hostname");
-    Flag::updateValue("tls_hostname", "localhost:" + TLSServerRunner::port());
-
-    enroll_tls_endpoint_ = Flag::getValue("enroll_tls_endpoint");
-    Flag::updateValue("enroll_tls_endpoint", "/enroll");
 
     distributed_tls_read_endpoint_ =
         Flag::getValue("distributed_tls_read_endpoint");
@@ -54,37 +46,129 @@ class DistributedTests : public testing::Test {
         Flag::getValue("distributed_tls_write_endpoint");
     Flag::updateValue("distributed_tls_write_endpoint", "/distributed_write");
 
-    tls_server_certs_ = Flag::getValue("tls_server_certs");
-    Flag::updateValue("tls_server_certs",
-                      kTestDataPath + "/test_server_ca.pem");
-
-    enroll_secret_path_ = Flag::getValue("enroll_secret_path");
-    Flag::updateValue("enroll_secret_path",
-                      kTestDataPath + "/test_enroll_secret.txt");
-
     Registry::setActive("distributed", "tls");
   }
 
   void TearDown() {
     TLSServerRunner::stop();
+    TLSServerRunner::unsetClientConfig();
     clearNodeKey();
-    Flag::updateValue("tls_hostname", tls_hostname_);
-    Flag::updateValue("enroll_tls_endpoint", enroll_tls_endpoint_);
+
     Flag::updateValue("distributed_tls_read_endpoint",
                       distributed_tls_read_endpoint_);
     Flag::updateValue("distributed_tls_write_endpoint",
                       distributed_tls_write_endpoint_);
-    Flag::updateValue("tls_server_certs", tls_server_certs_);
-    Flag::updateValue("enroll_secret_path", enroll_secret_path_);
   }
 
-  std::string tls_hostname_;
-  std::string enroll_tls_endpoint_;
+ protected:
   std::string distributed_tls_read_endpoint_;
   std::string distributed_tls_write_endpoint_;
-  std::string tls_server_certs_;
-  std::string enroll_secret_path_;
 };
+
+TEST_F(DistributedTests, test_serialize_distributed_query_request) {
+  DistributedQueryRequest r;
+  r.query = "foo";
+  r.id = "bar";
+
+  pt::ptree tree;
+  auto s = serializeDistributedQueryRequest(r, tree);
+  EXPECT_TRUE(s.ok());
+  EXPECT_EQ(tree.get<std::string>("query"), "foo");
+  EXPECT_EQ(tree.get<std::string>("id"), "bar");
+}
+
+TEST_F(DistributedTests, test_deserialize_distributed_query_request) {
+  pt::ptree tree;
+  tree.put<std::string>("query", "foo");
+  tree.put<std::string>("id", "bar");
+
+  DistributedQueryRequest r;
+  auto s = deserializeDistributedQueryRequest(tree, r);
+  EXPECT_TRUE(s.ok());
+  EXPECT_EQ(r.query, "foo");
+  EXPECT_EQ(r.id, "bar");
+}
+
+TEST_F(DistributedTests, test_deserialize_distributed_query_request_json) {
+  auto json =
+      "{"
+      "  \"query\": \"foo\","
+      "  \"id\": \"bar\""
+      "}";
+
+  DistributedQueryRequest r;
+  auto s = deserializeDistributedQueryRequestJSON(json, r);
+  EXPECT_TRUE(s.ok());
+  EXPECT_EQ(r.query, "foo");
+  EXPECT_EQ(r.id, "bar");
+}
+
+TEST_F(DistributedTests, test_serialize_distributed_query_result) {
+  DistributedQueryResult r;
+  r.request.query = "foo";
+  r.request.id = "bar";
+
+  Row r1;
+  r1["foo"] = "bar";
+  r.results = {r1};
+
+  pt::ptree tree;
+  auto s = serializeDistributedQueryResult(r, tree);
+  EXPECT_TRUE(s.ok());
+  EXPECT_EQ(tree.get<std::string>("request.query"), "foo");
+  EXPECT_EQ(tree.get<std::string>("request.id"), "bar");
+  auto& results = tree.get_child("results");
+  for (const auto& q : results) {
+    for (const auto& row : q.second) {
+      EXPECT_EQ(row.first, "foo");
+      EXPECT_EQ(q.second.get<std::string>(row.first), "bar");
+    }
+  }
+}
+
+TEST_F(DistributedTests, test_deserialize_distributed_query_result) {
+  pt::ptree request;
+  request.put<std::string>("id", "foo");
+  request.put<std::string>("query", "bar");
+
+  pt::ptree row;
+  row.put<std::string>("foo", "bar");
+  pt::ptree results;
+  results.push_back(std::make_pair("", row));
+
+  pt::ptree query_result;
+  query_result.put_child("request", request);
+  query_result.put_child("results", results);
+
+  DistributedQueryResult r;
+  auto s = deserializeDistributedQueryResult(query_result, r);
+  EXPECT_TRUE(s.ok());
+  EXPECT_EQ(r.request.id, "foo");
+  EXPECT_EQ(r.request.query, "bar");
+  EXPECT_EQ(r.results[0]["foo"], "bar");
+}
+
+TEST_F(DistributedTests, test_deserialize_distributed_query_result_json) {
+  auto json =
+      "{"
+      "  \"request\": {"
+      "    \"id\": \"foo\","
+      "    \"query\": \"bar\""
+      "  },"
+      "  \"results\": ["
+      "    {"
+      "      \"foo\": \"bar\""
+      "    }"
+      "  ]"
+      "}";
+
+  DistributedQueryResult r;
+  auto s = deserializeDistributedQueryResultJSON(json, r);
+  EXPECT_TRUE(s.ok());
+  EXPECT_EQ(r.request.id, "foo");
+  EXPECT_EQ(r.request.query, "bar");
+  EXPECT_EQ(r.results[0]["foo"], "bar");
+}
 
 TEST_F(DistributedTests, test_workflow) {
   auto dist = Distributed();
@@ -99,6 +183,6 @@ TEST_F(DistributedTests, test_workflow) {
   EXPECT_EQ(s.toString(), "OK");
 
   EXPECT_EQ(dist.getPendingQueryCount(), 0U);
-  EXPECT_EQ(dist.results_.size(), 2U);
+  EXPECT_EQ(dist.results_.size(), 0U);
 }
 }

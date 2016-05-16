@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-#  Copyright (c) 2014, Facebook, Inc.
+#  Copyright (c) 2014-present, Facebook, Inc.
 #  All rights reserved.
 #
 #  This source code is licensed under the BSD-style license found in the
@@ -16,6 +16,7 @@ function main_freebsd() {
   package git
   package python
   package py27-pip
+  package glog
   package snappy
   package rocksdb
   package thrift
@@ -24,4 +25,5 @@ function main_freebsd() {
   package boost-libs
   package cpp-netlib
   package magic
+  install_aws_sdk
 }

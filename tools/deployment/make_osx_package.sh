@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-#  Copyright (c) 2014, Facebook, Inc.
+#  Copyright (c) 2014-present, Facebook, Inc.
 #  All rights reserved.
 #
 #  This source code is licensed under the BSD-style license found in the
@@ -11,16 +11,20 @@ set -e
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 SOURCE_DIR="$SCRIPT_DIR/../.."
-source $SOURCE_DIR/tools/lib.sh
-distro "darwin" BUILD_VERSION
-if [[ "$BUILD_VERSION" == "10.10" ]]; then
-  BUILD_DIR="$SOURCE_DIR/build/darwin"
-else
-  BUILD_DIR="$SOURCE_DIR/build/darwin$BUILD_VERSION"
+BUILD_DIR="$SOURCE_DIR/build/"
+if [[ ! -z "$DEBUG" ]]; then
+  BUILD_DIR="${BUILD_DIR}debug_"
 fi
-export PATH="$PATH:/usr/local/bin"
 
-source $SCRIPT_DIR/../lib.sh
+if [[ "$BUILD_VERSION" == "10.11" ]]; then
+  BUILD_DIR="${BUILD_DIR}darwin"
+else
+  BUILD_DIR="${BUILD_DIR}darwin$BUILD_VERSION"
+fi
+
+export PATH="$PATH:/usr/local/bin"
+source "$SOURCE_DIR/tools/lib.sh"
+distro "darwin" BUILD_VERSION
 
 # Binary identifiers
 APP_VERSION=`git describe --tags HEAD`
@@ -29,7 +33,7 @@ KERNEL_APP_IDENTIFIER="com.facebook.osquery.kernel"
 LD_IDENTIFIER="com.facebook.osqueryd"
 LD_INSTALL="/Library/LaunchDaemons/$LD_IDENTIFIER.plist"
 OUTPUT_PKG_PATH="$BUILD_DIR/osquery-$APP_VERSION.pkg"
-KERNEL_OUTPUT_PKG_PATH="$BUILD_DIR/osquery-kernel-$APP_VERSION.pkg"
+KERNEL_OUTPUT_PKG_PATH="$BUILD_DIR/osquery-kernel-${BUILD_VERSION}-${APP_VERSION}.pkg"
 AUTOSTART=false
 CLEAN=false
 
@@ -46,13 +50,14 @@ OSQUERY_CONFIG_SRC=""
 OSQUERY_CONFIG_DST="/private/var/osquery/osquery.conf"
 OSQUERY_DB_LOCATION="/private/var/osquery/osquery.db/"
 OSQUERY_LOG_DIR="/private/var/log/osquery/"
+TLS_CERT_CHAIN_DST="/private/var/osquery/tls-server-certs.pem"
 
 WORKING_DIR=/tmp/osquery_packaging
-INSTALL_PREFIX=$WORKING_DIR/prefix
-SCRIPT_ROOT=$WORKING_DIR/scripts
-PREINSTALL=$SCRIPT_ROOT/preinstall
-POSTINSTALL=$SCRIPT_ROOT/postinstall
-OSQUERYCTL_PATH="$SOURCE_DIR/tools/deployment/osqueryctl"
+INSTALL_PREFIX="$WORKING_DIR/prefix"
+SCRIPT_ROOT="$WORKING_DIR/scripts"
+PREINSTALL="$SCRIPT_ROOT/preinstall"
+POSTINSTALL="$SCRIPT_ROOT/postinstall"
+OSQUERYCTL_PATH="$SCRIPT_DIR/osqueryctl"
 
 # Kernel extension identifiers and config files
 KERNEL_INLINE=false
@@ -62,10 +67,10 @@ KERNEL_EXTENSION_SRC="$BUILD_DIR/kernel/osquery.kext"
 KERNEL_EXTENSION_DST="/Library/Extensions/osquery.kext"
 
 KERNEL_WORKING_DIR=/tmp/osquery_kernel_packaging
-KERNEL_INSTALL_PREFIX=$KERNEL_WORKING_DIR/prefix
-KERNEL_SCRIPT_ROOT=$KERNEL_WORKING_DIR/scripts
-KERNEL_PREINSTALL=$KERNEL_SCRIPT_ROOT/preinstall
-KERNEL_POSTINSTALL=$KERNEL_SCRIPT_ROOT/postinstall
+KERNEL_INSTALL_PREFIX="$KERNEL_WORKING_DIR/prefix"
+KERNEL_SCRIPT_ROOT="$KERNEL_WORKING_DIR/scripts"
+KERNEL_PREINSTALL="$KERNEL_SCRIPT_ROOT/preinstall"
+KERNEL_POSTINSTALL="$KERNEL_SCRIPT_ROOT/postinstall"
 
 SCRIPT_PREFIX_TEXT="#!/usr/bin/env bash
 
@@ -99,6 +104,7 @@ function usage() {
   fatal "Usage: $0 [-c path/to/your/osquery.conf] [-l path/to/osqueryd.plist]
     -c PATH embed an osqueryd config.
     -l PATH override the default launchd plist.
+    -t PATH to embed a certificate chain file for TLS server validation
     -o PATH override the output path.
     -a start the daemon when the package is installed
     -x force the daemon to start fresh, removing any results previously stored in the database
@@ -121,6 +127,9 @@ function parse_args() {
                               ;;
       -l | --launchd )        shift
                               LAUNCHD_SRC=$1
+                              ;;
+      -t | --cert-chain )     shift
+                              TLS_CERT_CHAIN_SRC=$1
                               ;;
       -o | --output )         shift
                               OUTPUT_PKG_PATH=$1
@@ -192,7 +201,10 @@ function main() {
   cp $NEWSYSLOG_SRC $INSTALL_PREFIX$NEWSYSLOG_DST
   cp $OSQUERY_EXAMPLE_CONFIG_SRC $INSTALL_PREFIX$OSQUERY_EXAMPLE_CONFIG_DST
   cp $PACKS_SRC/* $INSTALL_PREFIX$PACKS_DST
-
+  if [[ "$TLS_CERT_CHAIN_SRC" != "" && -f "$TLS_CERT_CHAIN_SRC" ]]; then
+    cp $TLS_CERT_CHAIN_SRC $INSTALL_PREFIX$TLS_CERT_CHAIN_DST
+  fi
+ 
   # Move/install pre/post install scripts within the packaging root.
   log "finalizing preinstall and postinstall scripts"
   if [ $AUTOSTART == true ]  || [ $CLEAN == true ]; then
@@ -202,6 +214,7 @@ function main() {
         echo "$POSTINSTALL_CLEAN_TEXT" >> $POSTINSTALL
     fi
     if [ $AUTOSTART == true ]; then
+        echo "$POSTINSTALL_UNLOAD_TEXT" >> $POSTINSTALL
         echo "$POSTINSTALL_AUTOSTART_TEXT" >> $POSTINSTALL
     fi
   fi
@@ -240,10 +253,10 @@ function main() {
     fi
 
     log "creating kernel package"
-    pkgbuild --root $KERNEL_INSTALL_PREFIX       \
-             --scripts $KERNEL_SCRIPT_ROOT       \
-             --identifier $KERNEL_APP_IDENTIFIER \
-             --version $APP_VERSION              \
+    pkgbuild --root $KERNEL_INSTALL_PREFIX             \
+             --scripts $KERNEL_SCRIPT_ROOT             \
+             --identifier $KERNEL_APP_IDENTIFIER       \
+             --version ${BUILD_VERSION}-${APP_VERSION} \
              $KERNEL_OUTPUT_PKG_PATH 2>&1  1>/dev/null
     log "kernel package created at $KERNEL_OUTPUT_PKG_PATH"
   fi

@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-#  Copyright (c) 2014, Facebook, Inc.
+#  Copyright (c) 2014-present, Facebook, Inc.
 #  All rights reserved.
 #
 #  This source code is licensed under the BSD-style license found in the
@@ -139,7 +139,7 @@ def run_query(shell, query, timeout=0, count=1):
         "--profile_delay",
         "1",
         query
-    ])
+    ], timeout=timeout, count=count)
 
 
 def summary_line(name, result):
@@ -187,10 +187,16 @@ def summary(results, display=False):
 def profile(shell, queries, timeout=0, count=1, rounds=1):
     report = {}
     for name, query in queries.iteritems():
-        print("Profiling query: %s" % query)
+        forced = True if name == "force" else False
+        if not forced:
+            print("Profiling query: %s" % query)
         results = {}
         for i in range(rounds):
-            result = run_query(shell, query, timeout=timeout, count=count)
+            if forced:
+                result = utils.profile_cmd(shell, shell=True,
+                    timeout=timeout, count=count)
+            else:
+                result = run_query(shell, query, timeout=timeout, count=count)
             summary(
                 {"%s (%d/%d)" % (name, i + 1, rounds): result}, display=True)
             # Store each result round to return an average.
@@ -282,6 +288,10 @@ if __name__ == "__main__":
             utils.platform()),
         help="Path to osqueryi shell (./build/<sys>/osquery/osqueryi)."
     )
+    group.add_argument(
+        "--force", action="store_true", default=False,
+        help="Force run the target of shell",
+    )
 
     group = parser.add_argument_group("Performance Options:")
     group.add_argument(
@@ -316,10 +326,14 @@ if __name__ == "__main__":
         with open(args.check[0]) as fh:
             profile1 = json.loads(fh.read())
 
+<<<<<<< HEAD
     if not os.path.exists(args.shell):
 <<<<<<< HEAD
         print("Cannot find --daemon: %s" % (args.shell))
 =======
+=======
+    if not args.force and not os.path.exists(args.shell):
+>>>>>>> 9c01d4a6e348a53b30e9aa8ea256e80918d1cea9
         print("Cannot find --shell: %s" % (args.shell))
 >>>>>>> 769a723b5ccb97037b678a874480f37beb2281c6
         exit(1)
@@ -335,6 +349,8 @@ if __name__ == "__main__":
         queries = utils.queries_from_config(args.config)
     elif args.query is not None:
         queries["manual"] = args.query
+    elif args.force:
+        queries["force"] = True
     else:
         queries = utils.queries_from_tables(args.tables, args.restrict)
 

@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -10,16 +10,16 @@
 
 #pragma once
 
+#include <atomic>
 #include <functional>
-#include <memory>
 #include <map>
+#include <memory>
+#include <mutex>
+#include <thread>
 #include <vector>
 
-#include <boost/make_shared.hpp>
-#include <boost/thread.hpp>
-#include <boost/thread/locks.hpp>
-#include <boost/thread/mutex.hpp>
-
+#include <osquery/core.h>
+#include <osquery/dispatcher.h>
 #include <osquery/registry.h>
 #include <osquery/status.h>
 #include <osquery/tables.h>
@@ -78,8 +78,7 @@ using EventPublisherRef = std::shared_ptr<BaseEventPublisher>;
 using SubscriptionContextRef = std::shared_ptr<SubscriptionContext>;
 using EventContextRef = std::shared_ptr<EventContext>;
 using BaseEventSubscriber = EventSubscriber<BaseEventPublisher>;
-using EventSubscriberRef =
-    std::shared_ptr<EventSubscriber<BaseEventPublisher> >;
+using EventSubscriberRef = std::shared_ptr<EventSubscriber<BaseEventPublisher>>;
 
 /**
  * @brief EventSubscriber%s may exist in various states.
@@ -104,8 +103,8 @@ enum EventSubscriberState {
 };
 
 /// Use a single placeholder for the EventContextRef passed to EventCallback.
-using EventCallback = std::function<
-    Status(const EventContextRef&, const SubscriptionContextRef&)>;
+using EventCallback = std::function<Status(const EventContextRef&,
+                                           const SubscriptionContextRef&)>;
 
 /// An EventPublisher must track every subscription added.
 using SubscriptionVector = std::vector<SubscriptionRef>;
@@ -169,9 +168,12 @@ struct Subscription : private boost::noncopyable {
     subscription->callback = ec;
     return subscription;
   }
+
+ public:
+  Subscription() = delete;
 };
 
-class EventPublisherPlugin : public Plugin {
+class EventPublisherPlugin : public Plugin, public InterruptableRunnable {
  public:
   /**
    * @brief A new Subscription was added, potentially change state based on all
@@ -219,7 +221,7 @@ class EventPublisherPlugin : public Plugin {
    * run loop manager will exit the stepping loop and fall through to a call
    * to tearDown followed by a removal of the publisher.
    */
-  virtual void end() {}
+  virtual void stop() override {}
 
   /**
    * @brief A new EventSubscriber is subscribing events of this publisher type.
@@ -234,10 +236,8 @@ class EventPublisherPlugin : public Plugin {
     return Status(0);
   }
 
-  /// Remove all subscriptions.
-  virtual void removeSubscriptions() {
-    SubscriptionVector().swap(subscriptions_);
-  }
+  /// Remove all subscriptions from a named subscriber.
+  virtual void removeSubscriptions(const std::string& subscriber);
 
  public:
   /// Overriding the EventPublisher constructor is not recommended.
@@ -271,7 +271,7 @@ class EventPublisherPlugin : public Plugin {
   void hasStarted(bool started) { started_ = started; }
 
   /// Get the number of publisher restarts.
-  size_t restartCount() { return restart_count_; }
+  size_t restartCount() const { return restart_count_; }
 
  public:
   explicit EventPublisherPlugin(EventPublisherPlugin const&) = delete;
@@ -298,31 +298,40 @@ class EventPublisherPlugin : public Plugin {
 
   /// An Event ID is assigned by the EventPublisher within the EventContext.
   /// This is not used to store event date in the backing store.
-  EventContextID next_ec_id_{0};
+  std::atomic<EventContextID> next_ec_id_{0};
 
  private:
   /// Set ending to True to cause event type run loops to finish.
-  bool ending_{false};
+  std::atomic<bool> ending_{false};
 
   /// Set to indicate whether the event run loop ever started.
-  bool started_{false};
+  std::atomic<bool> started_{false};
 
   /// A lock for incrementing the next EventContextID.
-  boost::mutex ec_id_lock_;
+  std::mutex ec_id_lock_;
 
   /// A helper count of event publisher runloop iterations.
-  size_t restart_count_{0};
+  std::atomic<size_t> restart_count_{0};
 
  private:
   /// Enable event factory "callins" through static publisher callbacks.
   friend class EventFactory;
 
  private:
-  FRIEND_TEST(EventsTests, test_event_pub);
+  FRIEND_TEST(EventsTests, test_event_publisher);
   FRIEND_TEST(EventsTests, test_fire_event);
 };
 
 class EventSubscriberPlugin : public Plugin {
+ public:
+  /**
+   * @brief Add Subscription%s to the EventPublisher this module will act on.
+   *
+   * When the EventSubscriber%'s `init` method is called you are assured the
+   * EventPublisher has `setUp` and is ready to subscription for events.
+   */
+  virtual Status init() { return Status(0); }
+
  protected:
   /**
    * @brief Store parsed event data from an EventCallback in a backing store.
@@ -411,6 +420,20 @@ class EventSubscriberPlugin : public Plugin {
                      bool all);
 
   /**
+   * @brief Inspect the number of events, expire those overflowing events_max.
+   *
+   * When the event manager starts, or after a checkpoint number of events,
+   * the EventFactory will call expireCheck for each subscriber.
+   *
+   * The subscriber must count the number of buffered records and check if
+   * that count exceeds the configured `events_max` limit. If an overflow
+   * occurs the subscriber will expire N-events_max from the end of the queue.
+   *
+   * @param cleanup Perform an intense scan of zombie event IDs.
+   */
+  void expireCheck(bool cleanup = false);
+
+  /**
    * @brief Add an EventID, EventTime pair to all matching list types.
    *
    * The list types are defined by time size. Based on the EventTime this pair
@@ -424,6 +447,28 @@ class EventSubscriberPlugin : public Plugin {
    * @return Were the indexes recorded.
    */
   Status recordEvent(EventID& eid, EventTime time);
+
+  /**
+   * @brief Get the expiration timeout for this event type
+   *
+   * The default implementation retrieves this value from FLAGS_events_expiry.
+   * This method can be overridden to allow custom event expiration timeouts in
+   * subclasses of EventSubscriberPlugin.
+   *
+   * @return The events expiration timeout for this event type
+   */
+  virtual size_t getEventsExpiry();
+
+  /**
+   * @brief Get the max number of events for this event type
+   *
+   * The default implementation retrieves this value from FLAGS_events_max.
+   * This method can be overridden to allow custom max event numbers in
+   * subclasses of EventSubscriberPlugin.
+   *
+   * @return The max number of events for this event type
+   */
+  virtual size_t getEventsMax();
 
  public:
   /**
@@ -468,11 +513,24 @@ class EventSubscriberPlugin : public Plugin {
    * publishers. The namespace is a combination of the publisher and subscriber
    * registry plugin names.
    */
-  virtual EventPublisherID dbNamespace() const = 0;
+  /// See getType for lookup rational.
+  virtual EventPublisherID dbNamespace() const {
+    return getType() + '.' + getName();
+  }
 
   /// Disable event expiration for this subscriber.
   void doNotExpire() { expire_events_ = false; }
 
+  /// Trampoline into the EventFactory and lookup the name of the publisher.
+  virtual EventPublisherID& getType() const = 0;
+
+  /// Get a handle to the EventPublisher.
+  EventPublisherRef getPublisher() const;
+
+  /// Remove all subscriptions from this subscriber.
+  void removeSubscriptions();
+
+ protected:
   /// A helper value counting the number of fired events tracked by publishers.
   EventContextID event_count_{0};
 
@@ -480,7 +538,7 @@ class EventSubscriberPlugin : public Plugin {
   size_t subscription_count_{0};
 
  private:
-  Status setUp() { return Status(0, "Setup never used"); }
+  Status setUp() override { return Status(0, "Setup never used"); }
 
  private:
   /// Do not respond to periodic/scheduled/triggered event expiration requests.
@@ -489,6 +547,9 @@ class EventSubscriberPlugin : public Plugin {
   /// Events before the expire_time_ are invalid and will be purged.
   EventTime expire_time_{0};
 
+  /// Cached value of last generated EventID.
+  size_t last_eid_{0};
+
   /**
    * @brief Optimize subscriber selects by tracking the last select time.
    *
@@ -496,13 +557,13 @@ class EventSubscriberPlugin : public Plugin {
    * requiring an event 'time' constraint and otherwise applying a minimum time
    * as the last time the scheduled query ran.
    */
-  EventTime optimize_time_;
+  EventTime optimize_time_{0};
 
   /// Lock used when incrementing the EventID database index.
-  boost::mutex event_id_lock_;
+  std::mutex event_id_lock_;
 
   /// Lock used when recording an EventID and time into search bins.
-  boost::mutex event_record_lock_;
+  std::mutex event_record_lock_;
 
  private:
   friend class EventFactory;
@@ -513,6 +574,8 @@ class EventSubscriberPlugin : public Plugin {
   FRIEND_TEST(EventsDatabaseTests, test_record_indexing);
   FRIEND_TEST(EventsDatabaseTests, test_record_range);
   FRIEND_TEST(EventsDatabaseTests, test_record_expiration);
+  FRIEND_TEST(EventsDatabaseTests, test_gentable);
+  FRIEND_TEST(EventsDatabaseTests, test_expire_check);
   friend class BenchmarkEventSubscriber;
 };
 
@@ -636,6 +699,12 @@ class EventFactory : private boost::noncopyable {
   /// Return a list of subscriber registry names,
   static std::vector<std::string> subscriberNames();
 
+  /// Set log forwarding by adding a logger receiver.
+  static void addForwarder(const std::string& logger);
+
+  /// Optionally forward events to loggers.
+  static void forwardEvent(const std::string& event);
+
  public:
   /// The dispatched event thread's entry-point (if needed).
   static Status run(EventPublisherID& type_id);
@@ -692,7 +761,13 @@ class EventFactory : private boost::noncopyable {
   std::map<EventSubscriberID, EventSubscriberRef> event_subs_;
 
   /// Set of running EventPublisher run loop threads.
-  std::vector<std::shared_ptr<boost::thread> > threads_;
+  std::vector<std::shared_ptr<std::thread>> threads_;
+
+  /// Set of logger plugins to forward events.
+  std::vector<std::string> loggers_;
+
+  /// Factory publisher state manipulation.
+  Mutex factory_lock_;
 };
 
 /**
@@ -767,7 +842,7 @@ class EventPublisher : public EventPublisherPlugin {
    * @param ec The event that was fired.
    */
   void fireCallback(const SubscriptionRef& sub,
-                    const EventContextRef& ec) const {
+                    const EventContextRef& ec) const override {
     auto pub_sc = getSubscriptionContext(sub->context);
     auto pub_ec = getEventContext(ec);
     if (shouldFire(pub_sc, pub_ec) && sub->callback != nullptr) {
@@ -790,8 +865,8 @@ class EventPublisher : public EventPublisherPlugin {
   }
 
  private:
-  FRIEND_TEST(EventsTests, test_event_sub_subscribe);
-  FRIEND_TEST(EventsTests, test_event_sub_context);
+  FRIEND_TEST(EventsTests, test_event_subscriber_subscribe);
+  FRIEND_TEST(EventsTests, test_event_subscriber_context);
   FRIEND_TEST(EventsTests, test_fire_event);
 };
 
@@ -816,21 +891,13 @@ class EventSubscriber : public EventSubscriberPlugin {
 
  public:
   /**
-   * @brief Add Subscription%s to the EventPublisher this module will act on.
-   *
-   * When the EventSubscriber%'s `init` method is called you are assured the
-   * EventPublisher has `setUp` and is ready to subscription for events.
-   */
-  virtual Status init() { return Status(0); }
-
-  /**
    * @brief The registry plugin name for the subscriber's publisher.
    *
    * During event factory initialization the subscribers 'peek' at the registry
    * plugin name assigned to publishers. The corresponding publisher name is
    * interpreted as the subscriber's event 'type'.
    */
-  virtual EventPublisherID& getType() const {
+  virtual EventPublisherID& getType() const override {
     static EventPublisherID type = EventFactory::getType<PUB>();
     return type;
   };
@@ -867,16 +934,6 @@ class EventSubscriber : public EventSubscriberPlugin {
       EventFactory::addSubscription(sub->getType(), sub->getName(), sc, cb);
       subscription_count_++;
     }
-  }
-
-  /// See getType for lookup rational.
-  virtual EventPublisherID dbNamespace() const {
-    return getType() + '.' + getName();
-  }
-
-  /// Get a handle to the EventPublisher.
-  EventPublisherRef getPublisher() {
-    return EventFactory::getEventPublisher(getType());
   }
 
  public:
@@ -927,9 +984,6 @@ class EventSubscriber : public EventSubscriberPlugin {
 /// Iterate the event publisher registry and create run loops for each using
 /// the event factory.
 void attachEvents();
-
-/// Sleep in a boost::thread interruptible state.
-void publisherSleep(size_t milli);
 
 CREATE_REGISTRY(EventPublisherPlugin, "event_publisher");
 CREATE_REGISTRY(EventSubscriberPlugin, "event_subscriber");

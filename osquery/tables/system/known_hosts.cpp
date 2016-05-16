@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -15,6 +15,7 @@
 #include <osquery/tables.h>
 #include <osquery/filesystem.h>
 
+#include "osquery/core/conversions.h"
 #include "osquery/tables/system/system_utils.h"
 
 namespace osquery {

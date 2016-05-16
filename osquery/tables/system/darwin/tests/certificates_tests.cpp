@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -54,14 +54,14 @@ class CACertsTests : public ::testing::Test {
 
 TEST_F(CACertsTests, test_certificate_sha1) {
   std::string sha1;
-  sha1 = genSHA1ForCertificate(cert_der_data);
+  sha1 = genSHA1ForCertificate(x_cert);
 
   EXPECT_EQ("f149bae28e3c754ff4bb062b2c1b8bac81b8783e", sha1);
 }
 
 TEST_F(CACertsTests, test_certificate_properties) {
-  std::string subject, common_name;
-  genCommonName(x_cert, subject, common_name);
+  std::string subject, common_name, issuer;
+  genCommonName(x_cert, subject, common_name, issuer);
   EXPECT_EQ("localhost.localdomain", common_name);
 
   OSX_OPENSSL(X509_check_ca(x_cert));

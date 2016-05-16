@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -14,8 +14,8 @@
 
 #include <SystemConfiguration/SCNetworkReachability.h>
 
-#include <osquery/status.h>
 #include <osquery/events.h>
+#include <osquery/status.h>
 
 namespace osquery {
 
@@ -61,13 +61,11 @@ class SCNetworkEventPublisher
  public:
   void configure() override;
 
+  Status setUp() override { return Status(1, "Publisher not used"); }
   void tearDown() override;
 
   // Entrypoint to the run loop
   Status run() override;
-
-  // The event factory may end, stopping the SCNetwork runloop.
-  void end() override { stop(); }
 
  public:
   /// SCNetwork registers a client callback instead of using a select/poll loop.
@@ -84,7 +82,7 @@ class SCNetworkEventPublisher
   void restart();
 
   // Stop the run loop.
-  void stop();
+  void stop() override;
 
  private:
   void addHostname(const SCNetworkSubscriptionContextRef& sc);
@@ -92,11 +90,26 @@ class SCNetworkEventPublisher
   void addTarget(const SCNetworkSubscriptionContextRef& sc,
                  const SCNetworkReachabilityRef& target);
 
+  /// Helper method to clear all targets.
+  void clearAll();
+
  private:
+  /// Configured hostname targets.
   std::vector<std::string> target_names_;
+
+  /// Configured host address targets.
   std::vector<std::string> target_addresses_;
+
+  /// A container for all reachability targets.
   std::vector<SCNetworkReachabilityRef> targets_;
+
+  /// A target-association context sortage.
   std::vector<SCNetworkReachabilityContext*> contexts_;
+
+  /// This publisher thread's runloop.
   CFRunLoopRef run_loop_{nullptr};
+
+  /// Storage/container operations protection mutex.
+  mutable Mutex mutex_;
 };
 }

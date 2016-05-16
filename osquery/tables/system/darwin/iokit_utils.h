@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -7,6 +7,8 @@
  *  of patent rights can be found in the PATENTS file in the same directory.
  *
  */
+
+#pragma once
 
 #include <iomanip>
 #include <sstream>
@@ -34,7 +36,7 @@ struct IOKitPCIProperties {
   std::string driver;
 
   /// Populate IOKit PCI device properties from the "compatible" property.
-  IOKitPCIProperties(const std::string& compatible);
+  explicit IOKitPCIProperties(const std::string& compatible);
 };
 
 inline void idToHex(std::string& id) {

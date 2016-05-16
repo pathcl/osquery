@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -23,13 +23,17 @@
 namespace osquery {
 
 /// Globbing directory traversal function recursive limit.
-typedef unsigned short GlobLimits;
-
-enum {
+enum GlobLimits : size_t {
   GLOB_FILES = 0x1,
   GLOB_FOLDERS = 0x2,
   GLOB_ALL = GLOB_FILES | GLOB_FOLDERS,
+  GLOB_NO_CANON = 0x4,
 };
+
+inline GlobLimits operator|(GlobLimits a, GlobLimits b) {
+  return static_cast<GlobLimits>(static_cast<size_t>(a) |
+                                 static_cast<size_t>(b));
+}
 
 /// Globbing wildcard character.
 const std::string kSQLGlobWildcard = "%";
@@ -187,7 +191,7 @@ Status resolveFilePattern(const boost::filesystem::path& pattern,
  *
  * @param pattern the input and output filesystem glob pattern.
  */
-void replaceGlobWildcards(std::string& pattern);
+void replaceGlobWildcards(std::string& pattern, GlobLimits limits = GLOB_ALL);
 
 /// Attempt to remove a directory path.
 Status remove(const boost::filesystem::path& path);

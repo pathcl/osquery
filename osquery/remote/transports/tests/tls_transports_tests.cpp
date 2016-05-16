@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -41,10 +41,12 @@ class TLSTransportsTests : public testing::Test {
     return true;
   }
 
-  void SetUp() {
+  void SetUp() override {
     TLSServerRunner::start();
     port_ = TLSServerRunner::port();
   }
+
+  void TearDown() override { TLSServerRunner::stop(); }
 
  protected:
   std::string port_;

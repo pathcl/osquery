@@ -9,10 +9,14 @@ ensure_root() {
 ensure_root
 
 check_config() {
-  if [ ! -e $REAL_CONFIG_PATH ] ; then
-      echo "No osquery config file found at $REAL_CONFIG_PATH."
-      echo "See '$EXAMPLE_CONFIG_PATH' for an example config."
-      exit 4
+  if [ -e $REAL_CONFIG_PATH ]; then
+    $EXEC --config_path=$REAL_CONFIG_PATH --config_check
+  elif [ -e $FLAGS_FILE_PATH ]; then
+    :
+  else
+    echo "No osquery config file found at $REAL_CONFIG_PATH"
+    echo "See '$EXAMPLE_CONFIG_PATH' for an example config."
+    exit 4
   fi
 }
 
@@ -30,9 +34,9 @@ platform() {
 
 platform OS
 
-
-if [ $OS = "darwin" ]; then
+if [[ $OS = "darwin" ]]; then
   REAL_CONFIG_PATH="/var/osquery/osquery.conf"
+  FLAGS_FILE_PATH="/var/osquery/osquery.flags"
   EXAMPLE_CONFIG_PATH="/var/osquery/osquery.example.conf"
   PIDFILE="/var/osquery/osquery.pid"
   LOCKFILE="/var/osquery/osquery.lock"
@@ -44,8 +48,10 @@ if [ $OS = "darwin" ]; then
   LAUNCHCTL_LIST_PID=`echo $LAUNCHCTL_LIST | awk '{ print $1 }'`
 else
   INIT_SCRIPT_PATH="/etc/init.d/osqueryd"
-  if [ ! -e $INIT_SCRIPT_PATH ]; then
+  SERVICE_SCRIPT_PATH="/usr/lib/systemd/system/osqueryd.service"
+  if [ ! -e "$INIT_SCRIPT_PATH" && ! -f "$SERVICE_SCRIPT_PATH" ]; then
     echo "Cannot find the init.d script at $INIT_SCRIPT_PATH"
+    echo "Additionally, no systemd service at $SERVICE_SCRIPT_PATH"
     exit 6
   fi
 
@@ -128,7 +134,7 @@ case "$1" in
     $1
     ;;
   config-check)
-    $EXEC --config_path=$REAL_CONFIG_PATH --config_check
+    check_config
     ;;
   *)
     echo $"Usage: $0 {clean|config-check|start|stop|status|restart}"

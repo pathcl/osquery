@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -10,12 +10,13 @@
 
 #include <string>
 
-#include <boost/regex.hpp>
 #include <boost/xpressive/xpressive.hpp>
 
 #include <osquery/filesystem.h>
 #include <osquery/sql.h>
 #include <osquery/tables.h>
+
+#include "osquery/core/conversions.h"
 
 namespace xp = boost::xpressive;
 
@@ -27,6 +28,12 @@ const std::string kLinuxOSRelease = "/etc/redhat-release";
 const std::string kLinuxOSRegex =
     "(?P<name>[\\w+\\s]+) .* "
     "(?P<major>[0-9]+)\\.(?P<minor>[0-9]+)\\.?(?P<patch>\\w+)?";
+#elif defined(DEBIAN)
+const std::string kLinuxOSRelease = "/etc/os-release";
+const std::string kLinuxOSRegex =
+    "PRETTY_NAME=\"(?P<name>[\\w \\/]*) "
+    "(?P<major>[0-9]+)[\\.]{0,1}(?P<minor>[0-9]*)[\\.]{0,1}(?P<patch>[0-9]*).*"
+    "\"";
 #else
 const std::string kLinuxOSRelease = "/etc/os-release";
 const std::string kLinuxOSRegex =

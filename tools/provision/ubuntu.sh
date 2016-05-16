@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-#  Copyright (c) 2014, Facebook, Inc.
+#  Copyright (c) 2014-present, Facebook, Inc.
 #  All rights reserved.
 #
 #  This source code is licensed under the BSD-style license found in the
@@ -54,9 +54,9 @@ function main_ubuntu() {
   package libdpkg-dev
   package libudev-dev
   package libblkid-dev
-
   package libbz2-dev
   package libreadline-dev
+  package libcurl4-openssl-dev
 
   if [[ $DISTRO = "lucid" ]]; then
     package libopenssl-ruby
@@ -89,12 +89,10 @@ function main_ubuntu() {
 
     #install_pkgconfig
     package pkg-config
-    package libcurl4-openssl-dev
 
     install_autoconf
     install_automake
     install_libtool
-    install_boost
   else
     package clang-3.6
     package clang-format-3.6
@@ -109,55 +107,64 @@ function main_ubuntu() {
     package autoconf
     package automake
     package libtool
-    package libboost1.55-all-dev
   fi
 
   set_cc gcc #-4.8
   set_cxx g++ #-4.8
 
   install_cmake
-  install_gflags
-  install_iptables_dev
 
   if [[ $DISTRO = "lucid" ]]; then
-    install_snappy
-    install_libaptpkg
-    gem_install --no-user-install fpm -v 1.3.3
+    gem_install fpm -v 1.3.3
+    install_openssl
+    install_bison
   else
     # No clang++ on lucid
     set_cc clang
     set_cxx clang++
-    package libsnappy-dev
-    package libapt-pkg-dev
     gem_install fpm
-  fi
-
-  if [[ $DISTRO = "lucid" ]]; then
-    install_openssl
-    install_bison
-  else
     package bison
   fi
 
-  install_thrift
-  install_rocksdb
-  install_yara
-  install_cppnetlib
+  if [[ $DISTRO = "xenial" ]]; then
+    remove_package libunwind-dev
+  fi
+
+  install_boost
+  install_gflags
+  install_glog
   install_google_benchmark
 
-  # Need headers and PC macros
-  package libgcrypt-dev
-  package libdevmapper-dev
-  install_libcryptsetup
-  package libmagic-dev
+  install_snappy
+  install_rocksdb
+  install_thrift
+  install_yara
+  install_asio
+  install_cppnetlib
   install_sleuthkit
 
-  # Audit facility (kautitd) and netlink APIs
+  # Need headers and PC macros
+  if [[ $DISTRO = "vivid" || $DISTRO = "wily" || $DISRO = "xenial" ]]; then
+    package libgcrypt20-dev
+  else
+    package libgcrypt-dev
+  fi
+
+  package libdevmapper-dev
   package libaudit-dev
+  package libmagic-dev
+
+  install_libaptpkg
+  install_iptables_dev
+  install_libcryptsetup
 
   if [[ $DISTRO = "lucid" ]]; then
     package python-argparse
     package python-jinja2
     package python-psutil
+  elif [[ $DISTRO = "xenial" ]]; then
+    package python-setuptools
   fi
+
+  install_aws_sdk
 }

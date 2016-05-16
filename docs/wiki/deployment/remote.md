@@ -1,4 +1,4 @@
-osquery's remote configuration and logging plugins are completely optional. The only built-in optional plugins are **tls**. They very simply, receive and report via **https://** URI endpoints. osquery provides somewhat flexible node (the machine running osquery) authentication and identification though an 'enrollment' concept.
+osquery's remote configuration and logger plugins are completely optional. The only built-in optional plugins are **tls**. They very simply, receive and report via **https://** URI endpoints. osquery provides somewhat flexible node (the machine running osquery) authentication and identification though an 'enrollment' concept.
 
 The remote settings and plugins are mostly provided as examples. It is best to write custom plugins that implement specific web services or integrations. The remote settings uses a lot of additional [CLI-flags](../installation/cli-flags.md) for configuring the osquery clients, they are mostly organized under the **Remote Settings** heading.
 
@@ -9,17 +9,20 @@ The most important differentiator to the **filesystem** suite of plugins is an a
 The initial step is called an "enroll step" and in the case of **tls** plugins, uses an implicit *enroll* plugin, also called **tls**. If you enable either config or logger **tls** plugins the enrollment plugin will turn on automatically. Enrollment provides an initial secret to the remote server in order to negotiate a private node secret used for future identification. The process is simple:
 
 1. Configure a target `--tls_hostname`, `--enroll_tls_endpoint`.
-2. Submit an `--enroll_secret_path`, an `--enroll_secret_env`, or use TLS-client authentication, to the enroll endpoint.
-3. Receive a **node_key** and store within RocksDB.
-4. Make config/logger requests while providing **node_key** as identification/authentication.
+2. Place your server's root certificate authority's PEM-encoded certificate into a file, for example `/path/to/server-root.pem` and configure the note client to pin this root: `--tls_server_certs=`.
+3. Submit an `--enroll_secret_path`, an `--enroll_secret_env`, or use TLS-client authentication, to the enroll endpoint.
+4. Receive a **node_key** and store within the node's backing store (RocksDB).
+5. Make config/logger requests while providing **node_key** as identification/authentication.
 
-The validity of a **node_key** is determined and implemented in the TLS server. The client only manages to ask for the content during enroll, and posts the content during subsequent requests.
+The validity of a **node_key** is determined and implemented in the TLS server. The node only manages to ask for the content during enroll, and posts the content during subsequent requests.
+
+With osquery version 1.7.0, OS X clients **MUST** use a `--tls_server_certs` bundle since osquery is built using LibreSSL and no default certificate bundle is available on OS X.
 
 ### Simple shared secret enrollment
 
 A deployment key, called an enrollment shared secret, is the simplest **tls** plugin enrollment authentication method. A protected shared secret is written to disk and osquery reads then posts the content to `--enroll_tls_endpoint` once during enrollment. The TLS server may implement an enrollment request approval process that requires manual intervention/approval for each new enrollment request.
 
-After enrollment a client maintains the response **node_key** for authenticated requests to config and logger TLS endpoints.
+After enrollment, a node maintains the response **node_key** for authenticated requests to config and logger TLS endpoints.
 
 The shared secret can be stored in a plain-text file which is specified at runtime with the flag `--enroll_secret_path=/path/to/file.ext`.
 The shared secret can alternatively be kept in an environment variable which is specified with the flag `--enroll_secret_env=NAME_OF_VARIABLE`.
@@ -27,6 +30,8 @@ The shared secret can alternatively be kept in an environment variable which is 
 ### TLS client-auth enrollment
 
 If the **node** machines have a deployed TLS client certificate and key they should include those paths using `--tls_client_cert` and `--tls_client_key`. The TLS server may implement an enroll process to supply **nodes** with identifying **node_key**s or return blank keys during enrollment and require TLS client authentication for every endpoint request.
+
+If using TLS client authentication the enrollment step can be skipped entirely. Note that it is NOT skipped automatically. If your service does not need/implement enrollment include `--disable_enrollment` in the osquery configuration.
 
 ## Remote server API
 
@@ -150,6 +155,8 @@ There are several unlisted flags to further control the remote settings. These c
 
 In most cases the client plugins default to "3-strikes-you're-out" when attempting to GET/POST to the configured endpoints. If a configuration cannot be retrieved the client will exit non-0 but a non-responsive logger endpoint will cause logs to buffer in RocksDB. The logging buffer size can be controlled by a [CLI flag](../installation/cli-flags.md), and if the size overflows the logs will drop.
 
+The TLS client does not handle HTTP errors, if the service returns a bad request or otherwise an indicator of overflowed length, the request will fail. The default max size of values combined with the maximum number of log events to send per request are sane and should not overflow default HTTP server maximum request limits.
+
 ## Server testing
 
 We include a very basic example python TLS/HTTPS server: [./tools/tests/test_http_server.py](https://github.com/facebook/osquery/blob/master/tools/tests/test_http_server.py). And a set of unit/integration tests: [./osquery/remote/transports/tests/tls_transports_tests.cpp](https://github.com/facebook/osquery/blob/master/osquery/remote/transports/tests/tls_transports_tests.cpp) for a reference server implementation.
@@ -169,6 +176,8 @@ Additionally, the osquery TLS clients use a `osquery/X.Y.Z` UserAgent, where "X.
 ## Example projects
 
 Heroku maintains a great project called [Windmill](https://github.com/heroku/windmill), which implements the TLS remote settings API. It includes great documentation on compatibility, configuration, authentication, and enrollment. It is also a great place to start if you are considering writing an integration to the osquery remote settings API.
+
+[Doorman](https://github.com/mwielgoszewski/doorman) is another project that implements the TLS remote settings API. Doorman uses "tags", which can be applied to nodes, packs, and queries, in order to dynamically generate configurations for a unique set or all nodes being managed. Doorman also supports the distributed read and write API, allowing an administrator to schedule ad-hoc queries to be run immediately or in the future.
 
 **Remote settings testing**
 

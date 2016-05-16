@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -10,11 +10,13 @@
 
 #pragma once
 
+#include <atomic>
+
 #include <osquery/events.h>
 #include <osquery/status.h>
 
 #include <CoreServices/CoreServices.h>
-#include <IOKit/IOKitlib.h>
+#include <IOKit/IOKitLib.h>
 
 namespace osquery {
 
@@ -58,8 +60,6 @@ class IOKitEventPublisher
 
   Status run() override;
 
-  void end() override { stop(); }
-
   bool shouldFire(const IOKitSubscriptionContextRef& sc,
                   const IOKitEventContextRef& ec) const override;
 
@@ -75,23 +75,23 @@ class IOKitEventPublisher
 
  private:
   void restart();
-  void stop();
+  void stop() override;
 
  private:
-  // The publisher state machine will start, restart, and stop the run loop.
+  /// The publisher state machine will start, restart, and stop the run loop.
   CFRunLoopRef run_loop_{nullptr};
 
-  // Notification port, should close.
+  /// Notification port, should close.
   IONotificationPortRef port_{nullptr};
 
-  // Device attach iterator.
+  /// Device attach iterator.
   io_iterator_t iterator_;
 
-  // Device detach notification.
-  std::vector<std::shared_ptr<struct DeviceTracker> > devices_;
+  /// Device detach notification.
+  std::vector<std::shared_ptr<struct DeviceTracker>> devices_;
 
-  // Device notification tracking lock.
-  std::mutex notification_mutex_;
+  /// Device notification and container access protection mutex.
+  mutable Mutex mutex_;
 
   /**
    * @brief Should events be emitted by the callback.
@@ -100,6 +100,6 @@ class IOKitEventPublisher
    * consumed by an iterator walk. Do not emit events for this initial seed.
    * The publisher started boolean is set after a successful restart.
    */
-  bool publisher_started_{false};
+  std::atomic<bool> publisher_started_{false};
 };
 }

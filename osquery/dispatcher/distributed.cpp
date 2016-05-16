@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -8,8 +8,10 @@
  *
  */
 
+#include <osquery/distributed.h>
+#include <osquery/flags.h>
+
 #include "osquery/dispatcher/distributed.h"
-#include "osquery/distributed.h"
 
 namespace osquery {
 
@@ -23,12 +25,12 @@ DECLARE_string(distributed_plugin);
 
 void DistributedRunner::start() {
   auto dist = Distributed();
-  while (true) {
+  while (!interrupted()) {
     dist.pullUpdates();
     if (dist.getPendingQueryCount() > 0) {
       dist.runQueries();
     }
-    ::sleep(FLAGS_distributed_interval);
+    pauseMilli(FLAGS_distributed_interval * 1000);
   }
 }
 

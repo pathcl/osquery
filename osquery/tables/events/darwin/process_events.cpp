@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -30,6 +30,11 @@ class ProcessEventSubscriber : public EventSubscriber<KernelEventPublisher> {
 REGISTER(ProcessEventSubscriber, "event_subscriber", "process_events");
 
 Status ProcessEventSubscriber::init() {
+  auto pubref = EventFactory::getEventPublisher("kernel");
+  if (pubref == nullptr || pubref->isEnding()) {
+    return Status(1, "No kernel event publisher");
+  }
+
   auto sc = createSubscriptionContext();
   sc->event_type = OSQUERY_PROCESS_EVENT;
   subscribe(&ProcessEventSubscriber::Callback, sc);

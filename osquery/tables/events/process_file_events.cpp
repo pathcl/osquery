@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -20,16 +20,7 @@ namespace osquery {
 class ProcessFileEventSubscriber
     : public EventSubscriber<KernelEventPublisher> {
  public:
-  Status init() override {
-    auto pubref = EventFactory::getEventPublisher("kernel");
-    if (pubref == nullptr || !pubref->hasStarted() || pubref->isEnding()) {
-      return Status(1);
-    }
-
-    configure();
-    return Status(0);
-  }
-
+  Status init() override;
   /// Walk the configuration's file paths, create subscriptions.
   void configure() override;
 
@@ -39,11 +30,19 @@ class ProcessFileEventSubscriber
 
 REGISTER(ProcessFileEventSubscriber, "event_subscriber", "process_file_events");
 
-void ProcessFileEventSubscriber::configure() {
+Status ProcessFileEventSubscriber::init() {
+  auto pubref = EventFactory::getEventPublisher("kernel");
+  if (pubref == nullptr || pubref->isEnding()) {
+    return Status(1, "No kernel event publisher");
+  }
 
+  configure();
+  return Status(0);
+}
+
+void ProcessFileEventSubscriber::configure() {
   // There may be a better way to find the set intersection/difference.
-  auto pub = getPublisher();
-  pub->removeSubscriptions();
+  removeSubscriptions();
 
   Config::getInstance().files([this](const std::string &category,
                                      const std::vector<std::string> &files) {

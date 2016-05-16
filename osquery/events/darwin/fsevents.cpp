@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -55,64 +55,82 @@ void FSEventsSubscriptionContext::requireAction(const std::string& action) {
 }
 
 void FSEventsEventPublisher::restart() {
-  if (paths_.empty()) {
-    // There are no paths to watch.
-    paths_.insert("/dev/null/");
-  }
-
   if (run_loop_ == nullptr) {
-    // There is no run loop to restart.
     return;
   }
-
-  // Build paths as CFStrings
-  std::vector<CFStringRef> cf_paths;
-  for (const auto& path : paths_) {
-    auto cf_path =
-        CFStringCreateWithCString(nullptr, path.c_str(), kCFStringEncodingUTF8);
-    cf_paths.push_back(cf_path);
-  }
-
-  // The FSEvents watch takes a CFArrayRef
-  auto watch_list = CFArrayCreate(nullptr,
-                                  reinterpret_cast<const void**>(&cf_paths[0]),
-                                  cf_paths.size(),
-                                  &kCFTypeArrayCallBacks);
 
   // Remove any existing stream.
   stop();
 
-  // Create the FSEvent stream
-  stream_ = FSEventStreamCreate(nullptr,
-                                &FSEventsEventPublisher::Callback,
-                                nullptr,
-                                watch_list,
-                                kFSEventStreamEventIdSinceNow,
-                                1,
-                                kFSEventStreamCreateFlagFileEvents |
-                                    kFSEventStreamCreateFlagNoDefer |
-                                    kFSEventStreamCreateFlagWatchRoot);
-  if (stream_ != nullptr) {
-    // Schedule the stream on the run loop.
-    FSEventStreamScheduleWithRunLoop(stream_, run_loop_, kCFRunLoopDefaultMode);
-    if (FSEventStreamStart(stream_)) {
-      stream_started_ = true;
-    } else {
-      LOG(ERROR) << "Cannot start FSEvent stream: FSEventStreamStart failed";
+  // Build paths as CFStrings
+  {
+    WriteLock lock(mutex_);
+    if (paths_.empty()) {
+      // There are no paths to watch.
+      paths_.insert("/dev/null");
     }
-  } else {
-    LOG(ERROR) << "Cannot create FSEvent stream: FSEventStreamCreate failed";
-  }
 
-  // Clean up strings, watch list, and context.
-  CFRelease(watch_list);
-  for (auto& cf_path : cf_paths) {
-    CFRelease(cf_path);
+    std::vector<CFStringRef> cf_paths;
+    for (const auto& path : paths_) {
+      auto cf_path = CFStringCreateWithCString(
+          nullptr, path.c_str(), kCFStringEncodingUTF8);
+      cf_paths.push_back(cf_path);
+    }
+
+    // The FSEvents watch takes a CFArrayRef
+    auto watch_list =
+        CFArrayCreate(nullptr,
+                      reinterpret_cast<const void**>(&cf_paths[0]),
+                      cf_paths.size(),
+                      &kCFTypeArrayCallBacks);
+
+    // Set stream flags.
+    auto flags =
+        kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagWatchRoot;
+    if (no_defer_) {
+      flags |= kFSEventStreamCreateFlagNoDefer;
+    }
+    if (no_self_) {
+      flags |= kFSEventStreamCreateFlagIgnoreSelf;
+    }
+
+    // Create the FSEvent stream.
+    stream_ = FSEventStreamCreate(nullptr,
+                                  &FSEventsEventPublisher::Callback,
+                                  nullptr,
+                                  watch_list,
+                                  kFSEventStreamEventIdSinceNow,
+                                  1,
+                                  flags);
+    if (stream_ != nullptr) {
+      // Schedule the stream on the run loop.
+      FSEventStreamScheduleWithRunLoop(
+          stream_, run_loop_, kCFRunLoopDefaultMode);
+      if (FSEventStreamStart(stream_)) {
+        stream_started_ = true;
+      } else {
+        LOG(ERROR) << "Cannot start FSEvent stream: FSEventStreamStart failed";
+      }
+    } else {
+      LOG(ERROR) << "Cannot create FSEvent stream: FSEventStreamCreate failed";
+    }
+
+    // Clean up strings, watch list, and context.
+    CFRelease(watch_list);
+    for (auto& cf_path : cf_paths) {
+      CFRelease(cf_path);
+    }
   }
 }
 
 void FSEventsEventPublisher::stop() {
   // Stop the stream.
+  WriteLock lock(mutex_);
+  if (run_loop_ == nullptr) {
+    // No need to stop if there is not run loop.
+    return;
+  }
+
   if (stream_ != nullptr) {
     FSEventStreamStop(stream_);
     stream_started_ = false;
@@ -124,9 +142,7 @@ void FSEventsEventPublisher::stop() {
   }
 
   // Stop the run loop.
-  if (run_loop_ != nullptr) {
-    CFRunLoopStop(run_loop_);
-  }
+  CFRunLoopStop(run_loop_);
 }
 
 void FSEventsEventPublisher::tearDown() {
@@ -136,44 +152,57 @@ void FSEventsEventPublisher::tearDown() {
   run_loop_ = nullptr;
 }
 
+std::set<std::string> FSEventsEventPublisher::transformSubscription(
+    FSEventsSubscriptionContextRef& sc) const {
+  std::set<std::string> paths;
+  sc->discovered_ = sc->path;
+  if (sc->path.find("**") != std::string::npos) {
+    // Double star will indicate recursive matches, restricted to endings.
+    sc->recursive = true;
+    sc->discovered_ = sc->path.substr(0, sc->path.find("**"));
+    // Remove '**' from the subscription path (used to match later).
+    sc->path = sc->discovered_;
+  }
+
+  // If the path 'still' OR 'either' contains a single wildcard.
+  if (sc->path.find('*') != std::string::npos) {
+    // First check if the wildcard is applied to the end.
+    auto fullpath = fs::path(sc->path);
+    if (fullpath.filename().string().find('*') != std::string::npos) {
+      sc->discovered_ = fullpath.parent_path().string();
+    }
+
+    // FSEvents needs a real path, if the wildcard is within the path then
+    // a configure-time resolve is required.
+    if (sc->discovered_.find('*') != std::string::npos) {
+      std::vector<std::string> exploded_paths;
+      resolveFilePattern(sc->discovered_, exploded_paths);
+      for (const auto& path : exploded_paths) {
+        paths.insert(path);
+      }
+      sc->recursive_match = sc->recursive;
+      return paths;
+    }
+  }
+  paths.insert(sc->discovered_);
+  return paths;
+}
+
 void FSEventsEventPublisher::configure() {
   // Rebuild the watch paths.
-  for (auto& sub : subscriptions_) {
-    auto sc = getSubscriptionContext(sub->context);
-    if (sc->discovered_.size() > 0) {
-      continue;
-    }
+  stop();
 
-    sc->discovered_ = sc->path;
-    if (sc->path.find("**") != std::string::npos) {
-      // Double star will indicate recursive matches, restricted to endings.
-      sc->recursive = true;
-      sc->discovered_ = sc->path.substr(0, sc->path.find("**"));
-      // Remove '**' from the subscription path (used to match later).
-      sc->path = sc->discovered_;
-    }
-
-    // If the path 'still' OR 'either' contains a single wildcard.
-    if (sc->path.find('*') != std::string::npos) {
-      // First check if the wildcard is applied to the end.
-      auto fullpath = fs::path(sc->path);
-      if (fullpath.filename().string().find('*') != std::string::npos) {
-        sc->discovered_ = fullpath.parent_path().string();
-      }
-
-      // FSEvents needs a real path, if the wildcard is within the path then
-      // a configure-time resolve is required.
-      if (sc->discovered_.find('*') != std::string::npos) {
-        std::vector<std::string> paths;
-        resolveFilePattern(sc->discovered_, paths);
-        for (const auto& path : paths) {
-          paths_.insert(path);
-        }
-        sc->recursive_match = sc->recursive;
+  {
+    WriteLock lock(mutex_);
+    paths_.clear();
+    for (auto& sub : subscriptions_) {
+      auto sc = getSubscriptionContext(sub->context);
+      if (sc->discovered_.size() > 0) {
         continue;
       }
+      auto paths = transformSubscription(sc);
+      paths_.insert(paths.begin(), paths.end());
     }
-    paths_.insert(sc->discovered_);
   }
 
   restart();
@@ -262,11 +291,6 @@ bool FSEventsEventPublisher::shouldFire(
   return true;
 }
 
-void FSEventsEventPublisher::removeSubscriptions() {
-  std::set<std::string>().swap(paths_);
-  EventPublisherPlugin::removeSubscriptions();
-}
-
 void FSEventsEventPublisher::flush(bool async) {
   if (stream_ != nullptr && stream_started_) {
     if (async) {
@@ -277,11 +301,11 @@ void FSEventsEventPublisher::flush(bool async) {
   }
 }
 
-size_t FSEventsEventPublisher::numSubscriptionedPaths() {
+size_t FSEventsEventPublisher::numSubscriptionedPaths() const {
   return paths_.size();
 }
 
-bool FSEventsEventPublisher::isStreamRunning() {
+bool FSEventsEventPublisher::isStreamRunning() const {
   if (stream_ == nullptr || !stream_started_ || run_loop_ == nullptr) {
     return false;
   }

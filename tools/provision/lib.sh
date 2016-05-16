@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-#  Copyright (c) 2014, Facebook, Inc.
+#  Copyright (c) 2014-present, Facebook, Inc.
 #  All rights reserved.
 #
 #  This source code is licensed under the BSD-style license found in the
@@ -63,6 +63,8 @@ function install_gcc() {
     [ -L /usr/bin/g++ ] && sudo unlink /usr/bin/g++
     sudo ln -sf $TARGET/bin/gcc4.8.4 /usr/bin/gcc
     sudo ln -sf $TARGET/bin/g++4.8.4 /usr/bin/g++
+
+    sudo mkdir -p /usr/lib64
     sudo ln -sf $TARGET/lib64/libstdc++.so.6.0.19 /usr/lib64/libstdc++.so.6.0.19
     sudo ln -sf $TARGET/lib64/libstdc++.so.6.0.19 /usr/lib64/libstdc++.so.6
     popd
@@ -86,15 +88,16 @@ function install_cmake() {
 }
 
 function install_sleuthkit() {
-  SOURCE=sleuthkit-sleuthkit-4.1.3
+  SOURCE=sleuthkit-sleuthkit-4.2.0
   TARBALL=$SOURCE.tar.gz
   URL=$DEPS_URL/$TARBALL
 
-  if provision sleuthkid /usr/local/lib/libtsk.a; then
+  if provision sleuthkit /usr/local/lib/libtsk.a; then
     pushd $SOURCE
     ./bootstrap
     ./configure --prefix=/usr/local --without-afflib \
-      --disable-dependency-tracking --disable-java CFLAGS="$CFLAGS"
+      --disable-dependency-tracking --disable-java \
+      CXXFLAGS="$CXXFLAGS" CFLAGS="$CFLAGS"
     pushd tsk
     CC="$CC" CXX="$CXX" make -j $THREADS
     sudo make install
@@ -112,7 +115,7 @@ function install_thrift() {
   if provision thrift /usr/local/lib/libthrift.a; then
     pushd $SOURCE
     ./bootstrap.sh
-    ./configure CFLAGS="$CFLAGS" \
+    ./configure PREFIX="/usr/local" CFLAGS="$CFLAGS" CXXFLAGS="$CXXFLAGS" \
       --with-cpp=yes \
       --with-python=yes \
       --with-ruby=no \
@@ -129,17 +132,19 @@ function install_thrift() {
 }
 
 function install_rocksdb() {
-  TARBALL=rocksdb-3.10.2.tar.gz
+  SOURCE=rocksdb-4.4
+  TARBALL=$SOURCE.tar.gz
   URL=$DEPS_URL/$TARBALL
-  SOURCE=rocksdb-rocksdb-3.10.2
 
   if provision rocksdb /usr/local/lib/librocksdb_lite.a; then
-    if [[ ! -f rocksdb-rocksdb-3.10.2/librocksdb_lite.a ]]; then
+    if [[ ! -f $SOURCE/librocksdb_lite.a ]]; then
       if [[ $FAMILY = "debian" ]]; then
         CLANG_INCLUDE="-I/usr/include/clang/3.4/include"
       elif [[ $FAMILY = "redhat" ]]; then
         CLANG_VERSION=`clang --version | grep version | cut -d" " -f3`
         CLANG_INCLUDE="-I/usr/lib/clang/$CLANG_VERSION/include"
+        CC=clang
+        CXX=clang++
       fi
       pushd $SOURCE
       if [[ $OS = "freebsd" ]]; then
@@ -149,23 +154,27 @@ function install_rocksdb() {
       else
         MAKE=make
       fi
-      PORTABLE=1 OPT="-DROCKSDB_LITE=1" LIBNAME=librocksdb_lite CC="$CC" CXX="$CXX" \
-        $MAKE -j $THREADS static_lib CFLAGS="$CLANG_INCLUDE $CFLAGS"
+      CXXFLAGS="-DROCKSDB_LITE=1 $CXXFLAGS"
+      PORTABLE=1 OPT="-DROCKSDB_LITE=1" LIBNAME=librocksdb_lite \
+        CC="$CC" CXX="$CXX" CFLAGS="$CLANG_INCLUDE $CFLAGS" CXXFLAGS="$CXXFLAGS" \
+        $MAKE -j $THREADS static_lib
       popd
     fi
-    sudo cp rocksdb-rocksdb-3.10.2/librocksdb_lite.a /usr/local/lib
-    sudo cp -R rocksdb-rocksdb-3.10.2/include/rocksdb /usr/local/include
+    sudo cp $SOURCE/librocksdb_lite.a /usr/local/lib
+    sudo cp -R $SOURCE/include/rocksdb /usr/local/include
   fi
 }
 
 function install_snappy() {
-  SOURCE=snappy-1.1.1
+  SOURCE=snappy-1.1.3
   TARBALL=$SOURCE.tar.gz
   URL=$DEPS_URL/$TARBALL
 
   if provision snappy /usr/local/include/snappy.h; then
     pushd $SOURCE
-    CC="$CC" CXX="$CXX" ./configure --with-pic --enable-static
+    ./autogen.sh
+    CC="$CC" CXX="$CXX" ./configure --with-pic --enable-static \
+      CFLAGS="$CFLAGS" CXXFLAGS="$CXXFLAGS"
     if [[ ! -f .libs/libsnappy.a ]]; then
       make -j $THREADS
     fi
@@ -174,17 +183,36 @@ function install_snappy() {
   fi
 }
 
-function install_cppnetlib() {
-  SOURCE=cpp-netlib-0.11.2
+function install_asio() {
+  SOURCE=asio-1.11.0
   TARBALL=$SOURCE.tar.gz
   URL=$DEPS_URL/$TARBALL
 
-  if provision cppnetlib /usr/local/include/boost/network.hpp; then
+  if provision asio /usr/local/include/asio/ip/tcp.hpp; then
+    pushd $SOURCE/asio
+    ./autogen.sh
+    CC="$CC" CXX="$CXX" ./configure CFLAGS="$CFLAGS" CXXFLAGS="$CXXFLAGS"
+    make -j $THREADS
+    sudo make install
+    popd
+  fi
+}
+
+function install_cppnetlib() {
+  SOURCE=cpp-netlib-0.12.0-rc1
+  TARBALL=$SOURCE.tar.gz
+  URL=$DEPS_URL/$TARBALL
+
+  SOURCE=cpp-netlib-$SOURCE
+  # Note: use the header install since libdir was uncontrolled for a while.
+  if provision cppnetlib /usr/local/include/boost/network/version.hpp; then
     pushd $SOURCE
     mkdir -p build
     pushd build
-    CC="$CC" CXX="$CXX" cmake -DCMAKE_CXX_FLAGS="$CFLAGS" \
-      -DCPP-NETLIB_BUILD_EXAMPLES=False -DCPP-NETLIB_BUILD_TESTS=False  ..
+    CC="$CC" CXX="$CXX" cmake -DCMAKE_CXX_FLAGS="$CXXFLAGS" \
+      -DCMAKE_C_FLAGS="$CFLAGS" \
+      -DCPP-NETLIB_BUILD_EXAMPLES=False -DCPP-NETLIB_BUILD_TESTS=False \
+      -DCPP-NETLIB_ENABLE_HTTPS=True ..
     make -j $THREADS
     sudo make install
     popd
@@ -200,7 +228,8 @@ function install_yara() {
   if provision yara /usr/local/lib/libyara.a; then
     pushd $SOURCE
     ./bootstrap.sh
-    CC="$CC" CXX="$CXX" ./configure --with-pic --enable-static
+    CC="$CC" CXX="$CXX" ./configure --with-pic --enable-static \
+      CFLAGS="$CFLAGS" CXXFLAGS="$CXXFLAGS"
     make -j $THREADS
     sudo make install
     popd
@@ -214,7 +243,8 @@ function install_openssl() {
 
   if provision openssl /usr/local/lib/libssl.so.1.0.0; then
     pushd $SOURCE
-    CC="$CC" CXX="$CXX" ./config --prefix=/usr/local --openssldir=/etc/ssl \
+    CFLAGS="$CFLAGS" CXXFLAGS="$CXXFLAGS" CC="$CC" CXX="$CXX" ./config \
+      --prefix=/usr/local --openssldir=/etc/ssl \
       --libdir=lib shared zlib-dynamic enable-shared
     make -j $THREADS
     sudo make install
@@ -238,15 +268,33 @@ function install_bison() {
 }
 
 function install_boost() {
-  SOURCE=boost_1_55_0
+  SOURCE=boost_1_60_0
   TARBALL=$SOURCE.tar.gz
   URL=$DEPS_URL/$TARBALL
 
-  if provision boost /usr/local/lib/libboost_thread.a; then
+  if provision boost /usr/local/lib/libboost_filesystem.a; then
     pushd $SOURCE
     ./bootstrap.sh
-    sudo ./b2 --with=all -j $THREADS toolset="gcc" install || true
+    sudo ./b2 --with-regex --with-filesystem --with-system \
+      link=static optimization=space variant=release \
+      cflags="$CFLAGS" cxxflags="$CXXFLAGS" toolset="gcc" \
+      -j $THREADS install || true
     sudo ldconfig
+    popd
+  fi
+}
+
+function install_glog() {
+  SOURCE=glog-0.3.4
+  TARBALL=$SOURCE.tar.gz
+  URL=$DEPS_URL/$TARBALL
+
+  if provision glog /usr/local/lib/libglog.a; then
+    pushd $SOURCE
+    ./configure --disable-shared --prefix=/usr/local \
+      CFLAGS="$CFLAGS" CXXFLAGS="$CXXFLAGS"
+    CC="$CC" CXX="$CXX" make -j $THREADS
+    sudo make install
     popd
   fi
 }
@@ -258,7 +306,7 @@ function install_gflags() {
 
   if provision gflags /usr/local/lib/libgflags.a; then
     pushd $SOURCE
-    cmake -DCMAKE_CXX_FLAGS="$CFLAGS" -DGFLAGS_NAMESPACE:STRING=google .
+    cmake -DCMAKE_CXX_FLAGS="$CXXFLAGS" -DGFLAGS_NAMESPACE:STRING=google .
     CC="$CC" CXX="$CXX" make -j $THREADS
     sudo make install
     popd
@@ -274,7 +322,7 @@ function install_google_benchmark() {
     pushd $SOURCE
     mkdir -p build
     pushd build
-    cmake -DCMAKE_CXX_FLAGS="$CFLAGS" ..
+    cmake -DCMAKE_C_FLAGS="$CFLAGS" -DCMAKE_CXX_FLAGS="$CXXFLAGS" ..
     CC="$CC" CXX="$CXX" make -j $THREADS
     sudo make install
     popd
@@ -289,7 +337,8 @@ function install_iptables_dev() {
 
   if provision iptables_dev /usr/local/lib/libip4tc.a; then
     pushd $SOURCE
-    ./configure --disable-shared --prefix=/usr/local
+    ./configure --disable-shared --prefix=/usr/local \
+      CFLAGS="$CFLAGS" CXXFLAGS="$CXXFLAGS"
     pushd libiptc
     CC="$CC" CXX="$CXX" make -j $THREADS
     sudo make install
@@ -301,6 +350,58 @@ function install_iptables_dev() {
   fi
 }
 
+function install_device_mapper() {
+  SOURCE=LVM2.2.02.145
+  TARBALL=$SOURCE.tar.gz
+  URL=$DEPS_URL/$TARBALL
+
+  if provision libdevmapper /usr/local/lib/libdevmapper.a; then
+    pushd $SOURCE
+    ./configure --with-lvm1=none --prefix=/usr/local --enable-static_link \
+      CFLAGS="$CFLAGS" CXXFLAGS="$CXXFLAGS"
+    make libdm.device-mapper -j $THREADS
+    sudo cp libdm/ioctl/libdevmapper.a /usr/local/lib/
+    sudo cp libdm/libdevmapper.h /usr/local/include/
+    pushd libdm
+    sudo make install_pkgconfig
+    popd
+    popd
+  fi
+}
+
+function install_udev_devel_095() {
+  SOURCE=udev-095
+  TARBALL=$SOURCE.tar.gz
+  URL=$DEPS_URL/$TARBALL
+
+  if provision udev-095 /usr/local/lib/libudev.a; then
+    pushd $SOURCE
+    CC="$CC" CXX="$CXX" CFLAGS="$CFLAGS" CXXFLAGS="$CXXFLAGS" make libudev.a
+    sudo cp libudev.a /usr/local/lib/
+    popd
+  fi
+}
+
+function install_libaptpkg() {
+  SOURCE=apt-1.2.6
+  TARBALL=$SOURCE.tar.gz
+  URL=$DEPS_URL/$TARBALL
+
+  if provision libaptpkg /usr/local/lib/libapt-pkg.a; then
+    pushd $SOURCE
+    make clean
+    ./configure --prefix=/usr/local CFLAGS="$CFLAGS" CXXFLAGS="$CXXFLAGS"
+    make -j $THREADS STATICLIBS=1 library
+    # No need to install the shared libraries.
+    # sudo cp bin/libapt-pkg.so.4.12.0 /usr/local/lib/
+    # sudo ln -sf /usr/local/lib/libapt-pkg.so.4.12.0 /usr/local/lib/libapt-pkg.so
+    sudo cp bin/libapt-pkg.a /usr/local/lib/
+    sudo mkdir -p /usr/local/include/apt-pkg/
+    sudo cp include/apt-pkg/*.h /usr/local/include/apt-pkg/
+    popd
+  fi
+}
+
 function install_libcryptsetup() {
   SOURCE=cryptsetup-1.6.7
   TARBALL=$SOURCE.tar.gz
@@ -308,8 +409,11 @@ function install_libcryptsetup() {
 
   if provision libcryptsetup /usr/local/lib/libcryptsetup.a; then
     pushd $SOURCE
-    ./autogen.sh --prefix=/usr/local --enable-static --disable-kernel_crypto
-    ./configure --prefix=/usr/local --enable-static --disable-kernel_crypto
+    PKG_CONFIG_PATH=/usr/local/lib/pkgconfig/ \
+      ./autogen.sh --prefix=/usr/local --enable-static --disable-shared \
+        --disable-selinux --disable-udev --disable-veritysetup  --disable-nls \
+        --disable-kernel_crypto \
+        CFLAGS="$CFLAGS" CXXFLAGS="$CXXFLAGS"
     pushd lib
     make -j $THREADS
     sudo make install
@@ -317,6 +421,31 @@ function install_libcryptsetup() {
     popd
   fi
 }
+
+function install_aws_sdk() {
+  SOURCE=aws-sdk-cpp-0.10.6
+  TARBALL=$SOURCE.tar.gz
+  URL=$DEPS_URL/$TARBALL
+
+  if provision aws_sdk /usr/local/lib/libaws-cpp-sdk-core.a; then
+    PREFIX=/usr/local
+    mkdir -p ${SOURCE}/build
+    pushd ${SOURCE}/build
+    CMAKE_FLAGS="-Wno-dev -DCMAKE_INSTALL_PREFIX=${PREFIX} \
+               -DCMAKE_BUILD_TYPE=Release \
+               -DBUILD_ONLY=aws-cpp-sdk-kinesis;aws-cpp-sdk-firehose \
+               -DSTATIC_LINKING=1 -DNO_HTTP_CLIENT=1"
+    cmake $CMAKE_FLAGS ..
+    make -j$THREADS
+    sudo make install
+    sudo ln -s ${PREFIX}/lib/linux/intel64/Release/libaws-cpp-sdk-* ${PREFIX}/lib
+    popd
+  fi
+}
+
+#############################################################################
+## The following package installs are utilities not statically linked.
+#############################################################################
 
 function install_autoconf() {
   SOURCE=autoconf-2.69
@@ -386,19 +515,6 @@ function install_pkgconfig() {
   fi
 }
 
-function install_udev_devel_095() {
-  SOURCE=udev-095
-  TARBALL=$SOURCE.tar.gz
-  URL=$DEPS_URL/$TARBALL
-
-  if provision udev-095 /usr/local/lib/libudev.a; then
-    pushd $SOURCE
-    CC="$CC" CXX="$CXX" make libudev.a
-    sudo cp libudev.a /usr/local/lib/
-    popd
-  fi
-}
-
 function install_pip() {
   PYTHON_EXECUTABLE=$1
   URL=$DEPS_URL/get-pip.py
@@ -432,41 +548,25 @@ function install_ruby() {
   fi
 }
 
-function install_libaptpkg() {
-  SOURCE=apt-0.8.16-12.10.22
-  TARBALL=$SOURCE.tar.gz
-  URL=$DEPS_URL/$TARBALL
-
-  if provision libaptpkg /usr/local/lib/libapt-pkg.a; then
-    pushd $SOURCE
-    mkdir -p build
-    pushd build
-    ../configure --prefix=/usr/local
-    make -j $THREADS STATICLIBS=1 library
-    sudo cp bin/libapt-pkg.so.4.12.0 /usr/local/lib/
-    sudo ln -sf /usr/local/lib/libapt-pkg.so.4.12.0 /usr/local/lib/libapt-pkg.so
-    sudo cp bin/libapt-pkg.a /usr/local/lib/
-    sudo mkdir -p /usr/local/include/apt-pkg/
-    sudo cp include/apt-pkg/*.h /usr/local/include/apt-pkg/
-    popd
-    popd
-  fi
-}
-
 function package() {
   if [[ $FAMILY = "debian" ]]; then
-    if [[ -n "$(dpkg --get-selections | grep $1)" ]]; then
+    INSTALLED=`dpkg-query -W -f='${Status} ${Version}\n' $1 || true`
+    if [[ -n "$INSTALLED" && ! "$INSTALLED" = *"unknown ok not-installed"* ]]; then
       log "$1 is already installed. skipping."
     else
       log "installing $1"
-      sudo DEBIAN_FRONTEND=noninteractive apt-get install $1 -y
+      sudo DEBIAN_FRONTEND=noninteractive apt-get install $1 -y --no-install-recommends
     fi
   elif [[ $FAMILY = "redhat" ]]; then
     if [[ ! -n "$(rpm -V $1)" ]]; then
       log "$1 is already installed. skipping."
     else
       log "installing $1"
-      sudo yum install $1 -y
+      if [[ $OS = "fedora" ]]; then
+        sudo dnf install $1 -y
+      else
+        sudo yum install $1 -y
+      fi
     fi
   elif [[ $OS = "darwin" ]]; then
     if [[ -n "$(brew list | grep $1)" ]]; then
@@ -487,8 +587,13 @@ function package() {
         HOMEBREW_ARGS="--build-bottle --with-static"
       elif [[ $1 = "libressl" ]]; then
         HOMEBREW_ARGS="--build-bottle"
+      elif [[ $1 = "aws-sdk-cpp" ]]; then
+        HOMEBREW_ARGS="--build-bottle --with-static --without-http-client"
       fi
-      brew install -v $HOMEBREW_ARGS $1 || brew upgrade -v $HOMEBREW_ARGS $@
+      if [[ "$2" = "devel" ]]; then
+        HOMEBREW_ARGS="${HOMEBREW_ARGS} --devel"
+      fi
+      brew install -v $HOMEBREW_ARGS $1 || brew upgrade -v $HOMEBREW_ARGS $1
     fi
   elif [[ $OS = "freebsd" ]]; then
     if pkg info -q $1; then

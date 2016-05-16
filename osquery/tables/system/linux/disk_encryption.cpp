@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -43,7 +43,7 @@ void genFDEStatusForBlockDevice(const std::string &name,
     r["encrypted"] = "1";
 
     int crypt_init;
-#if defined(CENTOS_CENTOS6) || defined(RHEL_RHEL6)
+#if defined(CENTOS_CENTOS6) || defined(RHEL_RHEL6) || defined(SCIENTIFIC_SCIENTIFIC6)
     crypt_init = crypt_init_by_name(&cd, name.c_str());
 #else
     crypt_init =

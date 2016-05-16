@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -43,17 +43,7 @@ CLI_FLAG(bool,
          "Disable re-enrollment attempts if related plugins return invalid");
 
 Status clearNodeKey() {
-  std::string node_key;
-  auto s = getDatabaseValue(kPersistentSettings, "nodeKey", node_key);
-  if (!s.ok()) {
-    return s;
-  }
-
-  if (node_key.size() > 0) {
-    return deleteDatabaseValue(kPersistentSettings, "nodeKey");
-  }
-
-  return Status(0, "OK");
+  return deleteDatabaseValue(kPersistentSettings, "nodeKey");
 }
 
 std::string getNodeKey(const std::string& enroll_plugin) {

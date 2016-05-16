@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -32,6 +32,10 @@ void ExtensionHandler::call(ExtensionResponse& _return,
   // internal registry call. It is the ONLY actor that resolves registry
   // item aliases.
   auto local_item = Registry::getAlias(registry, item);
+  if (local_item.empty()) {
+    // Extensions may not know about active (non-option based registries).
+    local_item = Registry::getActive(registry);
+  }
 
   PluginResponse response;
   PluginRequest plugin_request;
@@ -44,7 +48,6 @@ void ExtensionHandler::call(ExtensionResponse& _return,
   _return.status.code = status.getCode();
   _return.status.message = status.getMessage();
   _return.status.uuid = uuid_;
-
   if (status.ok()) {
     for (const auto& response_item : response) {
       // Translate a PluginResponse to an ExtensionPluginResponse.
@@ -176,6 +179,15 @@ bool ExtensionManagerHandler::exists(const std::string& name) {
 ExtensionRunnerCore::~ExtensionRunnerCore() { remove(path_); }
 
 void ExtensionRunnerCore::stop() {
+  {
+    std::unique_lock<std::mutex> lock(service_start_);
+    service_stopping_ = true;
+    if (transport_ != nullptr) {
+      // This is an opportunity to interrupt the transport listens.
+    }
+  }
+
+  // In most cases the service thread has started before the stop request.
   if (server_ != nullptr) {
     server_->stop();
   }
@@ -191,23 +203,26 @@ inline void removeStalePaths(const std::string& manager) {
 }
 
 void ExtensionRunnerCore::startServer(TProcessorRef processor) {
-  auto transport = TServerTransportRef(new TServerSocket(path_));
-  // Before starting and after stopping the manager, remove stale sockets.
-  removeStalePaths(path_);
+  {
+    std::unique_lock<std::mutex> lock(service_start_);
+    // A request to stop the service may occur before the thread starts.
+    if (service_stopping_) {
+      return;
+    }
 
-  auto transport_fac = TTransportFactoryRef(new TBufferedTransportFactory());
-  auto protocol_fac = TProtocolFactoryRef(new TBinaryProtocolFactory());
+    transport_ = TServerTransportRef(new TServerSocket(path_));
+    // Before starting and after stopping the manager, remove stale sockets.
+    removeStalePaths(path_);
 
-  // The minimum number of worker threads is 1.
-  size_t threads = (FLAGS_worker_threads > 0) ? FLAGS_worker_threads : 1;
-  manager_ = ThreadManager::newSimpleThreadManager(threads, 0);
-  auto thread_fac = ThriftThreadFactory(new PosixThreadFactory());
-  manager_->threadFactory(thread_fac);
-  manager_->start();
+    // Construct the service's transport, protocol, thread pool.
+    auto transport_fac = TTransportFactoryRef(new TBufferedTransportFactory());
+    auto protocol_fac = TProtocolFactoryRef(new TBinaryProtocolFactory());
 
-  // Start the Thrift server's run loop.
-  server_ = TThreadPoolServerRef(new TThreadPoolServer(
-      processor, transport, transport_fac, protocol_fac, manager_));
+    // Start the Thrift server's run loop.
+    server_ = TThreadedServerRef(new TThreadedServer(
+        processor, transport_, transport_fac, protocol_fac));
+  }
+
   server_->serve();
 }
 
@@ -226,14 +241,9 @@ void ExtensionRunner::start() {
 }
 
 ExtensionManagerRunner::~ExtensionManagerRunner() {
+  // Only attempt to remove stale paths if the server was started.
+  std::unique_lock<std::mutex> lock(service_start_);
   if (server_ != nullptr) {
-    // Eventually this extension manager should be stopped.
-    // This involves a lock around assuring the thread context for destruction
-    // matches and the server has begun serving (potentially opaque to our 
-    // our use of ThreadPollServer API).
-    // In newer (forks) version of thrift this server implementation has been
-    // deprecated.
-    // server_->stop();
     removeStalePaths(path_);
   }
 }

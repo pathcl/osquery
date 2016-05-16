@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-#  Copyright (c) 2014, Facebook, Inc.
+#  Copyright (c) 2014-present, Facebook, Inc.
 #  All rights reserved.
 #
 #  This source code is licensed under the BSD-style license found in the
@@ -24,14 +24,17 @@ function main_darwin() {
   package doxygen
   package boost
   package gflags
+  package glog
   package lz4
   package snappy
   package rocksdb
   package thrift
   package yara
   package libressl
+  package asio
   package cpp-netlib
   package google-benchmark
   package libmagic
   package sleuthkit
+  package aws-sdk-cpp
 }

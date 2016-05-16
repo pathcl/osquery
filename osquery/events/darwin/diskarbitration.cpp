@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -8,13 +8,15 @@
  *
  */
 
+#include <fstream>
+#include <iomanip>
+
+#include <osquery/filesystem.h>
 #include <osquery/logger.h>
 #include <osquery/tables.h>
-#include <osquery/filesystem.h>
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/filesystem.hpp>
-#include <fstream>
 
 #include "osquery/core/conversions.h"
 #include "osquery/events/darwin/diskarbitration.h"
@@ -23,18 +25,19 @@ namespace fs = boost::filesystem;
 
 namespace osquery {
 
+const std::string kIOHIDXClassPath = "IOService:/IOResources/IOHDIXController/";
+
 REGISTER(DiskArbitrationEventPublisher, "event_publisher", "diskarbitration");
 
 void DiskArbitrationEventPublisher::restart() {
   if (run_loop_ == nullptr) {
     return;
   }
+
   stop();
 
-  if (session_ == nullptr) {
-    session_ = DASessionCreate(kCFAllocatorDefault);
-  }
-
+  WriteLock lock(mutex_);
+  session_ = DASessionCreate(kCFAllocatorDefault);
   DARegisterDiskAppearedCallback(
       session_,
       nullptr,
@@ -47,6 +50,36 @@ void DiskArbitrationEventPublisher::restart() {
       nullptr);
 
   DASessionScheduleWithRunLoop(session_, run_loop_, kCFRunLoopDefaultMode);
+}
+
+Status DiskArbitrationEventPublisher::run() {
+  if (run_loop_ == nullptr) {
+    run_loop_ = CFRunLoopGetCurrent();
+    restart();
+  }
+
+  CFRunLoopRun();
+  return Status(0, "OK");
+}
+
+void DiskArbitrationEventPublisher::stop() {
+  if (run_loop_ == nullptr) {
+    return;
+  }
+
+  WriteLock lock(mutex_);
+  if (session_ != nullptr) {
+    DASessionUnscheduleFromRunLoop(session_, run_loop_, kCFRunLoopDefaultMode);
+    CFRelease(session_);
+    session_ = nullptr;
+  }
+
+  CFRunLoopStop(run_loop_);
+}
+
+void DiskArbitrationEventPublisher::tearDown() {
+  stop();
+  run_loop_ = nullptr;
 }
 
 void DiskArbitrationEventPublisher::DiskAppearedCallback(DADiskRef disk,
@@ -118,7 +151,7 @@ bool DiskArbitrationEventPublisher::shouldFire(
     // We want only virtual disk (DMG) events
     if (ec->action == "add") {
       // Filter events by matching on Virtual Interface based on IO device path
-      return (boost::starts_with(ec->device_path, kIOHIDXClassPath_));
+      return (boost::starts_with(ec->device_path, kIOHIDXClassPath));
     } else {
       return true;
     }
@@ -226,33 +259,5 @@ std::string DiskArbitrationEventPublisher::getProperty(
         CFUUIDCreateString(kCFAllocatorDefault, (CFUUIDRef)value));
   }
   return "";
-}
-
-Status DiskArbitrationEventPublisher::run() {
-  if (run_loop_ == nullptr) {
-    run_loop_ = CFRunLoopGetCurrent();
-    restart();
-  }
-
-  CFRunLoopRun();
-
-  osquery::publisherSleep(1000);
-  return Status(0, "OK");
-}
-
-void DiskArbitrationEventPublisher::stop() {
-  if (session_ != nullptr) {
-    DASessionUnscheduleFromRunLoop(session_, run_loop_, kCFRunLoopDefaultMode);
-    session_ = nullptr;
-  }
-
-  if (run_loop_ != nullptr) {
-    CFRunLoopStop(run_loop_);
-  }
-}
-
-void DiskArbitrationEventPublisher::tearDown() {
-  stop();
-  run_loop_ = nullptr;
 }
 }

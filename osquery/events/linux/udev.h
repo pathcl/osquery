@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -112,7 +112,12 @@ class UdevEventPublisher
  private:
   /// udev handle (socket descriptor contained within).
   struct udev* handle_{nullptr};
+
+  /// udev monitor.
   struct udev_monitor* monitor_{nullptr};
+
+  /// Protection around udev resources.
+  Mutex mutex_;
 
  private:
   /// Check subscription details.

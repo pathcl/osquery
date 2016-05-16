@@ -19,12 +19,15 @@ pages:
   - Configuration: deployment/configuration.md
   - Logging: deployment/logging.md
   - Aggregating Logs: deployment/log-aggregation.md
+  - AWS Logging: deployment/aws-logging.md
   - Performance Safety: deployment/performance-safety.md
   - Anomaly Detection: deployment/anomaly-detection.md
   - Extensions: deployment/extensions.md
   - File Integrity Monitoring: deployment/file-integrity-monitoring.md
   - YARA Scanning: deployment/yara.md
   - Remote settings: deployment/remote.md
+  - Syslog: deployment/syslog.md
+  - Debugging: deployment/debugging.md
 - Development:
   - Building osquery: development/building.md
   - Contributing Code: development/contributing-code.md
@@ -37,3 +40,4 @@ pages:
   - Adding CLI Arguments: development/options-arguments.md
   - Reading/Writing Files: development/reading-files.md
   - Kernel: development/kernel.md
+  - Windows Provisioning: development/windows-provisioning.md

@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -7,6 +7,8 @@
  *  of patent rights can be found in the PATENTS file in the same directory.
  *
  */
+
+#pragma once
 
 #include <sys/sysctl.h>
 
@@ -35,7 +37,8 @@ void genControlInfo(int* oid,
                     const std::map<std::string, std::string>& config);
 
 /// Must be implemented by the platform.
-void genControlInfoFromName(const std::string& name, QueryData& results,
-                    const std::map<std::string, std::string>& config);
+void genControlInfoFromName(const std::string& name,
+                            QueryData& results,
+                            const std::map<std::string, std::string>& config);
 }
 }

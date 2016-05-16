@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -14,10 +14,13 @@
 #include <boost/noncopyable.hpp>
 #include <boost/property_tree/json_parser.hpp>
 
+#include <osquery/events.h>
 #include <osquery/extensions.h>
 #include <osquery/filesystem.h>
 #include <osquery/flags.h>
 #include <osquery/logger.h>
+
+#include "osquery/core/conversions.h"
 
 namespace pt = boost::property_tree;
 
@@ -33,6 +36,8 @@ FLAG(bool, disable_logging, false, "Disable ERROR/INFO logging");
 FLAG(string, logger_plugin, "filesystem", "Logger plugin name");
 
 FLAG(bool, log_result_events, true, "Log scheduled results as events");
+
+class LoggerDisabler;
 
 /**
  * @brief A custom Glog log sink for forwarding or buffering status logs.
@@ -130,23 +135,32 @@ class BufferedLogSink : public google::LogSink, private boost::noncopyable {
 
   /// Track multiple loggers that should receive sinks from the send forwarder.
   std::vector<std::string> sinks_;
+
+ private:
+  friend class LoggerDisabler;
 };
 
 /// Scoped helper to perform logging actions without races.
 class LoggerDisabler {
  public:
-  LoggerDisabler() : stderr_status_(FLAGS_logtostderr) {
+  LoggerDisabler()
+      : stderr_status_(FLAGS_logtostderr),
+        enabled_(BufferedLogSink::instance().enabled_) {
     BufferedLogSink::disable();
     FLAGS_logtostderr = true;
   }
 
   ~LoggerDisabler() {
-    BufferedLogSink::enable();
+    // Only enable if the sink was enabled when the disabler was requested.
+    if (enabled_) {
+      BufferedLogSink::enable();
+    }
     FLAGS_logtostderr = stderr_status_;
   }
 
  private:
   bool stderr_status_;
+  bool enabled_;
 };
 
 static void serializeIntermediateLog(const std::vector<StatusLogLine>& log,
@@ -187,8 +201,7 @@ static void deserializeIntermediateLog(const PluginRequest& request,
     log.push_back({
         (StatusLogSeverity)item.second.get<int>("s", O_INFO),
         item.second.get<std::string>("f", "<unknown>"),
-        item.second.get<int>("i", 0),
-        item.second.get<std::string>("m", ""),
+        item.second.get<int>("i", 0), item.second.get<std::string>("m", ""),
     });
   }
 }
@@ -247,6 +260,14 @@ void initLogger(const std::string& name, bool forward_all) {
   // Stop the buffering sink and store the intermediate logs.
   BufferedLogSink::disable();
   auto intermediate_logs = std::move(BufferedLogSink::dump());
+  // Start the custom status logging facilities, which may instruct Glog as is
+  // the case with filesystem logging.
+  PluginRequest request = {{"init", name}};
+  serializeIntermediateLog(intermediate_logs, request);
+  if (!request["log"].empty()) {
+    request["log"].pop_back();
+  }
+
   const auto& logger_plugin = Registry::getActive("logger");
   // Allow multiple loggers, make sure each is accessible.
   for (const auto& logger : osquery::split(logger_plugin, ",")) {
@@ -254,10 +275,6 @@ void initLogger(const std::string& name, bool forward_all) {
       continue;
     }
 
-    // Start the custom status logging facilities, which may instruct Glog as
-    // is the case with filesystem logging.
-    PluginRequest request = {{"init", name}};
-    serializeIntermediateLog(intermediate_logs, request);
     auto status = Registry::call("logger", logger, request);
     if (status.ok() || forward_all) {
       // When LoggerPlugin::init returns success we enable the log sink in
@@ -267,6 +284,12 @@ void initLogger(const std::string& name, bool forward_all) {
       // To support multiple plugins we only add the names of plugins that
       // return a success status after initialization.
       BufferedLogSink::addPlugin(logger);
+    }
+
+    request = {{"action", "features"}};
+    status = Registry::call("logger", logger, request);
+    if ((status.getCode() & LOGGER_FEATURE_LOGEVENT) > 0) {
+      EventFactory::addForwarder(logger);
     }
   }
 }
@@ -286,20 +309,19 @@ void BufferedLogSink::send(google::LogSeverity severity,
       if (std::find(enabled.begin(), enabled.end(), logger) != enabled.end()) {
         // May use the logs_ storage to buffer/delay sending logs.
         std::vector<StatusLogLine> log;
-        log.push_back({(StatusLogSeverity)severity,
-                       std::string(base_filename),
-                       line,
-                       std::string(message, message_len)});
+        log.push_back({(StatusLogSeverity)severity, std::string(base_filename),
+                       line, std::string(message, message_len)});
         PluginRequest request = {{"status", "true"}};
         serializeIntermediateLog(log, request);
+        if (!request["log"].empty()) {
+          request["log"].pop_back();
+        }
         Registry::call("logger", logger, request);
       }
     }
   } else {
-    logs_.push_back({(StatusLogSeverity)severity,
-                     std::string(base_filename),
-                     line,
-                     std::string(message, message_len)});
+    logs_.push_back({(StatusLogSeverity)severity, std::string(base_filename),
+                     line, std::string(message, message_len)});
   }
 }
 
@@ -311,14 +333,20 @@ Status LoggerPlugin::call(const PluginRequest& request,
     return this->logString(request.at("string"));
   } else if (request.count("snapshot") > 0) {
     return this->logSnapshot(request.at("snapshot"));
-  } else if (request.count("health") > 0) {
-    return this->logHealth(request.at("health"));
   } else if (request.count("init") > 0) {
     deserializeIntermediateLog(request, intermediate_logs);
-    return this->init(request.at("init"), intermediate_logs);
+    this->init(request.at("init"), intermediate_logs);
+    return Status(this->usesLogStatus() ? 0 : 1);
   } else if (request.count("status") > 0) {
     deserializeIntermediateLog(request, intermediate_logs);
     return this->logStatus(intermediate_logs);
+  } else if (request.count("event") > 0) {
+    return this->logEvent(request.at("event"));
+  } else if (request.count("action") && request.at("action") == "features") {
+    size_t features = 0;
+    features |= (usesLogStatus()) ? LOGGER_FEATURE_LOGSTATUS : 0;
+    features |= (usesLogEvent()) ? LOGGER_FEATURE_LOGEVENT : 0;
+    return Status(features);
   } else {
     return Status(1, "Unsupported call to logger plugin");
   }
@@ -331,9 +359,12 @@ Status logString(const std::string& message, const std::string& category) {
 Status logString(const std::string& message,
                  const std::string& category,
                  const std::string& receiver) {
-  auto status = Registry::call(
+  if (FLAGS_disable_logging) {
+    return Status(0, "Logging disabled");
+  }
+
+  return Registry::call(
       "logger", receiver, {{"string", message}, {"category", category}});
-  return Status(0, "OK");
 }
 
 Status logQueryLogItem(const QueryLogItem& results) {
@@ -342,53 +373,74 @@ Status logQueryLogItem(const QueryLogItem& results) {
 
 Status logQueryLogItem(const QueryLogItem& results,
                        const std::string& receiver) {
-  std::string json;
+  if (FLAGS_disable_logging) {
+    return Status(0, "Logging disabled");
+  }
+
+  std::vector<std::string> json_items;
   Status status;
   if (FLAGS_log_result_events) {
-    status = serializeQueryLogItemAsEventsJSON(results, json);
+    status = serializeQueryLogItemAsEventsJSON(results, json_items);
   } else {
+    std::string json;
     status = serializeQueryLogItemJSON(results, json);
+    json_items.push_back(json);
   }
   if (!status.ok()) {
     return status;
   }
-  return logString(json, "event", receiver);
+
+  for (auto& json : json_items) {
+    if (!json.empty() && json.back() == '\n') {
+      json.pop_back();
+      status = logString(json, "event", receiver);
+    }
+  }
+  return status;
 }
 
 Status logSnapshotQuery(const QueryLogItem& item) {
+  if (FLAGS_disable_logging) {
+    return Status(0, "Logging disabled");
+  }
+
   std::string json;
   if (!serializeQueryLogItemJSON(item, json)) {
     return Status(1, "Could not serialize snapshot");
   }
+  if (!json.empty() && json.back() == '\n') {
+    json.pop_back();
+  }
   return Registry::call("logger", {{"snapshot", json}});
 }
 
-Status logHealthStatus(const QueryLogItem& item) {
-  std::string json;
-  if (!serializeQueryLogItemJSON(item, json)) {
-    return Status(1, "Could not serialize health");
-  }
-  return Registry::call("logger", {{"health", json}});
-}
-
 void relayStatusLogs() {
+  if (FLAGS_disable_logging) {
+    return;
+  }
+
   // Prevent our dumping and registry calling from producing additional logs.
   LoggerDisabler disabler;
 
   // Construct a status log plugin request.
-  PluginRequest req = {{"status", "true"}};
+  PluginRequest request = {{"status", "true"}};
   auto& status_logs = BufferedLogSink::dump();
   if (status_logs.size() == 0) {
     return;
   }
+  serializeIntermediateLog(status_logs, request);
+  if (!request["log"].empty()) {
+    request["log"].pop_back();
+  }
 
   // Skip the registry's logic, and send directly to the core's logger.
-  PluginResponse resp;
-  serializeIntermediateLog(status_logs, req);
-  if (!Registry::call("logger", req, resp)) {
-    // Flush the buffered status logs.
-    // Otherwise the extension call failed and the buffering should continue.
-    status_logs.clear();
-  }
+  PluginResponse response;
+  Registry::call("logger", request, response);
+
+  // Flush the buffered status logs.
+  // If the logger called failed then the logger is experiencing a catastrophic
+  // failure, since it is missing from the registry. The logger plugin may
+  // return failure, but it should have buffered independently of the failure.
+  status_logs.clear();
 }
 }

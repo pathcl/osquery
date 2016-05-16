@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -23,7 +23,7 @@ class EventsConfigParserPluginTests : public testing::Test {};
 TEST_F(EventsConfigParserPluginTests, test_get_event) {
   // Reset the schedule in case other tests were modifying.
   auto& c = Config::getInstance();
-  // TODO: might need a reset.
+  c.reset();
 
   // Generate content to update/add to the config.
   std::string content;
@@ -47,5 +47,8 @@ TEST_F(EventsConfigParserPluginTests, test_get_event) {
   for (const auto& var : data.get_child("events.environment_variables")) {
     EXPECT_TRUE(var.second.data() == "foo" || var.second.data() == "bar");
   }
+
+  // Reset the configuration.
+  c.reset();
 }
 }

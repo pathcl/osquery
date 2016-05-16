@@ -1,9 +1,9 @@
 targets = {
   "debian7" => {
-    "box" => "deb/wheezy-amd64"
+    "box" => "bento/debian-7.9"
   },
   "debian8" => {
-    "box" => "deb/jessie-amd64"
+    "box" => "bento/debian-8.2"
   },
   "centos6.5" => {
     "box" => "bento/centos-6.7"
@@ -11,8 +11,14 @@ targets = {
   "centos7.1"   => {
     "box" => "bento/centos-7.1"
   },
-	"ubuntu15.04"  => {
-    "box" => "ubuntu/vivid64"
+  "ubuntu15.04"  => {
+    "box" => "bento/ubuntu-15.04"
+  },
+  "ubuntu15.10"  => {
+    "box" => "bento/ubuntu-15.10"
+  },
+  "ubuntu16.04"  => {
+    "box" => "bento/ubuntu-16.04"
   },
   "ubuntu14"  => {
     "box" => "ubuntu/trusty64"

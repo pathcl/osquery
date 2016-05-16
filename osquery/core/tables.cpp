@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -111,17 +111,19 @@ Status TablePlugin::call(const PluginRequest& request,
   }
 
   if (request.at("action") == "generate") {
-    // "generate" runs the table implementation using a PluginRequest with
-    // optional serialized QueryContext and returns the QueryData results as
-    // the PluginRequest data.
+    // The "generate" action runs the table implementation using a PluginRequest
+    // with optional serialized QueryContext and returns the QueryData results
+    // as the PluginRequest data.
+
+    // Create a fake table implementation for caching.
     QueryContext context;
     if (request.count("context") > 0) {
       setContextFromRequest(request, context);
     }
     response = generate(context);
   } else if (request.at("action") == "columns") {
-    // "columns" returns a PluginRequest filled with column information
-    // such as name and type.
+    // The "columns" action returns a PluginRequest filled with column
+    // information such as name and type.
     const auto& column_list = columns();
     for (const auto& column : column_list) {
       response.push_back(
@@ -305,5 +307,20 @@ bool QueryContext::hasConstraint(const std::string& column,
     return false;
   }
   return constraints.at(column).exists(op);
+}
+
+Status QueryContext::expandConstraints(
+    const std::string& column,
+    ConstraintOperator op,
+    std::set<std::string>& output,
+    std::function<Status(const std::string& constraint,
+                         std::set<std::string>& output)> predicate) {
+  for (const auto& constraint : constraints[column].getAll(op)) {
+    auto status = predicate(constraint, output);
+    if (!status) {
+      return status;
+    }
+  }
+  return Status(0);
 }
 }

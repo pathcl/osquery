@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -28,5 +28,6 @@ TEST_F(OptionsConfigParserPluginTests, test_get_option) {
   EXPECT_EQ(c.getParser("options")->getData().get_child("options").get<bool>(
                 "enable_monitor"),
             true);
+  c.reset();
 }
 }

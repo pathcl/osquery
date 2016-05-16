@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-#  Copyright (c) 2014, Facebook, Inc.
+#  Copyright (c) 2014-present, Facebook, Inc.
 #  All rights reserved.
 #
 #  This source code is licensed under the BSD-style license found in the
@@ -21,10 +21,9 @@ import unittest
 import test_base
 
 SHELL_TIMEOUT = 10
-
+EXIT_CATASTROPHIC = 78
 
 class OsqueryiTest(unittest.TestCase):
-
     def setUp(self):
         self.binary = os.path.join(test_base.ARGS.build, "osquery", "osqueryi")
         self.osqueryi = test_base.OsqueryWrapper(self.binary)
@@ -38,6 +37,7 @@ class OsqueryiTest(unittest.TestCase):
         self.assertRaises(test_base.OsqueryException,
                           self.osqueryi.run_query, 'foo')
 
+    @test_base.flaky
     def test_config_check_success(self):
         '''Test that a 0-config passes'''
         proc = test_base.TimeoutRunner([
@@ -58,6 +58,7 @@ class OsqueryiTest(unittest.TestCase):
         print(proc.stderr)
         self.assertEqual(proc.proc.poll(), 0)
 
+    @test_base.flaky
     def test_config_dump(self):
         '''Test that config raw output is dumped when requested'''
         config = "%s/test_noninline_packs.conf" % test_base.SCRIPT_DIR
@@ -74,7 +75,8 @@ class OsqueryiTest(unittest.TestCase):
 >>>>>>> 769a723b5ccb97037b678a874480f37beb2281c6
         self.assertEqual(proc.proc.poll(), 0)
 
-    def test_config_check_failure(self):
+    @test_base.flaky
+    def test_config_check_failure_invalid_path(self):
         '''Test that a missing config fails'''
         proc = test_base.TimeoutRunner([
             self.binary,
@@ -88,6 +90,8 @@ class OsqueryiTest(unittest.TestCase):
         print(proc.stderr)
         self.assertEqual(proc.proc.poll(), 1)
 
+    @test_base.flaky
+    def test_config_check_failure_valid_path(self):
         # Now with a valid path, but invalid content.
         proc = test_base.TimeoutRunner([
             self.binary,
@@ -99,6 +103,8 @@ class OsqueryiTest(unittest.TestCase):
         self.assertEqual(proc.proc.poll(), 1)
         self.assertNotEqual(proc.stderr, "")
 
+    @test_base.flaky
+    def test_config_check_failure_missing_plugin(self):
         # Finally with a missing config plugin
         proc = test_base.TimeoutRunner([
             self.binary,
@@ -111,7 +117,10 @@ class OsqueryiTest(unittest.TestCase):
             SHELL_TIMEOUT)
         self.assertNotEqual(proc.stderr, "")
         self.assertNotEqual(proc.proc.poll(), 0)
+        # Also do not accept a SIGSEG
+        self.assertEqual(proc.proc.poll(), EXIT_CATASTROPHIC)
 
+    @test_base.flaky
     def test_config_check_example(self):
         '''Test that the example config passes'''
         example_path = "deployment/osquery.example.conf"
@@ -172,6 +181,7 @@ class OsqueryiTest(unittest.TestCase):
             result = self.osqueryi.run_command(command)
         pass
 
+    @test_base.flaky
     def test_time(self):
         '''Demonstrating basic usage of OsqueryWrapper with the time table'''
         self.osqueryi.run_command(' ')  # flush error output
@@ -183,6 +193,13 @@ class OsqueryiTest(unittest.TestCase):
         self.assertTrue(0 <= int(row['minutes']) <= 60)
         self.assertTrue(0 <= int(row['seconds']) <= 60)
 
+    @test_base.flaky
+    def test_time_using_all(self):
+        self.osqueryi.run_command(' ')
+        result = self.osqueryi.run_command('.all time')
+        self.assertNotEqual(result.rstrip(), "Error querying table: time")
+
+    @test_base.flaky
     def test_config_bad_json(self):
         self.osqueryi = test_base.OsqueryWrapper(self.binary,
                                                  args={"config_path": "/"})

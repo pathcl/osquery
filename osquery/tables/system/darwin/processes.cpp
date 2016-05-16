@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -19,7 +19,6 @@
 #include <mach-o/dyld_images.h>
 
 #include <boost/algorithm/string.hpp>
-#include <boost/algorithm/string/trim.hpp>
 
 #include <osquery/core.h>
 #include <osquery/filesystem.h>
@@ -36,6 +35,14 @@ namespace tables {
 
 #define CPU_TIME_RATIO 1000000
 #define START_TIME_RATIO 1000000000
+
+// Process states are as defined in sys/proc.h
+// SIDL   (1) Process being created by fork
+// SRUN   (2) Currently runnable
+// SSLEEP (3) Sleeping on an address
+// SSTOP  (4) Process debugging or suspension
+// SZOMB  (5) Awaiting collection by parent
+const char kProcessStateMapping[] = {' ', 'I', 'R', 'S', 'T', 'Z'};
 
 std::set<int> getProcList(const QueryContext &context) {
   std::set<int> pidlist;
@@ -68,8 +75,8 @@ std::set<int> getProcList(const QueryContext &context) {
     return pidlist;
   }
 
-  int num_pids = bufsize / sizeof(pid_t);
-  for (int i = 0; i < num_pids; ++i) {
+  size_t num_pids = bufsize / sizeof(pid_t);
+  for (size_t i = 0; i < num_pids; ++i) {
     // if the pid is negative or 0, it doesn't represent a real process so
     // continue the iterations so that we don't add it to the results set
     if (pids[i] <= 0) {
@@ -95,7 +102,7 @@ struct proc_cred {
   uint32_t parent{0};
   uint32_t group{0};
   uint32_t status{0};
-  uint32_t nice{0};
+  int32_t nice{0};
   struct {
     uid_t uid{0};
     gid_t gid{0};
@@ -106,7 +113,7 @@ inline bool getProcCred(int pid, proc_cred &cred) {
   struct proc_bsdinfo bsdinfo;
   struct proc_bsdshortinfo bsdinfo_short;
 
-  if (proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &bsdinfo, PROC_PIDTBSDINFO_SIZE) ==
+  if (proc_pidinfo(pid, PROC_PIDTBSDINFO, 1, &bsdinfo, PROC_PIDTBSDINFO_SIZE) ==
       PROC_PIDTBSDINFO_SIZE) {
     cred.parent = bsdinfo.pbi_ppid;
     cred.group = bsdinfo.pbi_pgid;
@@ -121,7 +128,7 @@ inline bool getProcCred(int pid, proc_cred &cred) {
     return true;
   } else if (proc_pidinfo(pid,
                           PROC_PIDT_SHORTBSDINFO,
-                          0,
+                          1,
                           &bsdinfo_short,
                           PROC_PIDT_SHORTBSDINFO_SIZE) ==
              PROC_PIDT_SHORTBSDINFO_SIZE) {
@@ -256,9 +263,11 @@ QueryData genProcesses(QueryContext &context) {
     proc_cred cred;
     if (getProcCred(pid, cred)) {
       r["parent"] = BIGINT(cred.parent);
-      r["group"] = BIGINT(cred.group);
-      // Use Linux diction for process status/state.
-      r["state"] = INTEGER(cred.status);
+      r["pgroup"] = BIGINT(cred.group);
+      // check if process state is one of the expected ones
+      r["state"] = (1 <= cred.status && cred.status <= 5)
+                       ? TEXT(kProcessStateMapping[cred.status])
+                       : TEXT('?');
       r["nice"] = INTEGER(cred.nice);
       r["uid"] = BIGINT(cred.real.uid);
       r["gid"] = BIGINT(cred.real.gid);
@@ -267,16 +276,7 @@ QueryData genProcesses(QueryContext &context) {
       r["suid"] = BIGINT(cred.saved.uid);
       r["sgid"] = BIGINT(cred.saved.gid);
     } else {
-      r["parent"] = "0";
-      r["group"] = "0";
-      r["state"] = "0";
-      r["nice"] = "0";
-      r["uid"] = "-1";
-      r["gid"] = "-1";
-      r["euid"] = "-1";
-      r["egid"] = "-1";
-      r["suid"] = "-1";
-      r["sgid"] = "-1";
+      continue;
     }
 
     // If the path of the executable that started the process is available and
@@ -554,7 +554,7 @@ void genProcessMemoryMap(int pid, QueryData &results) {
   }
 }
 
-QueryData genProcessMemoryMap(QueryContext& context) {
+QueryData genProcessMemoryMap(QueryContext &context) {
   QueryData results;
 
   auto pidlist = getProcList(context);

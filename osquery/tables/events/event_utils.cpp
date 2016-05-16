@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -11,6 +11,8 @@
 #include <osquery/events.h>
 #include <osquery/hash.h>
 #include <osquery/sql.h>
+
+#include "osquery/tables/events/event_utils.h"
 
 namespace osquery {
 

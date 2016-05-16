@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -15,6 +15,7 @@
 #include <memory>
 #include <vector>
 #include <set>
+#include <unordered_map>
 
 #include <boost/lexical_cast.hpp>
 #include <boost/property_tree/ptree.hpp>
@@ -29,7 +30,7 @@
   do {                                                                    \
     _Pragma("clang diagnostic push")                                      \
         _Pragma("clang diagnostic ignored \"-Wdeprecated-declarations\"") \
-        expr;                                                             \
+            expr;                                                         \
     _Pragma("clang diagnostic pop")                                       \
   } while (0)
 
@@ -89,8 +90,8 @@ enum ColumnType {
 extern const std::map<ColumnType, std::string> kColumnTypeNames;
 
 /// Helper alias for TablePlugin names.
-typedef std::string TableName;
-typedef std::vector<std::pair<std::string, ColumnType> > TableColumns;
+using TableName = std::string;
+using TableColumns = std::vector<std::pair<std::string, ColumnType>>;
 struct QueryContext;
 
 /**
@@ -104,7 +105,12 @@ enum ConstraintOperator : unsigned char {
   GREATER_THAN = 4,
   LESS_THAN_OR_EQUALS = 8,
   LESS_THAN = 16,
-  GREATER_THAN_OR_EQUALS = 32
+  GREATER_THAN_OR_EQUALS = 32,
+  MATCH = 64,
+  LIKE = 65,
+  GLOB = 66,
+  REGEXP = 67,
+  UNIQUE = 1,
 };
 
 /// Type for flags for what constraint operators are admissible.
@@ -139,7 +145,7 @@ struct Constraint {
  *
  * A constraint list supports all AS_LITERAL types, and all ConstraintOperators.
  */
-struct ConstraintList {
+struct ConstraintList : private boost::noncopyable {
   /// The SQLite affinity type.
   ColumnType affinity;
 
@@ -231,7 +237,7 @@ struct ConstraintList {
   std::set<std::string> getAll(ConstraintOperator op) const;
 
   /// See ConstraintList::getAll, but as a selected literal type.
-  template<typename T>
+  template <typename T>
   std::set<T> getAll(ConstraintOperator op) const {
     std::set<T> literal_matches;
     auto matches = getAll(op);
@@ -283,15 +289,69 @@ struct ConstraintList {
 };
 
 /// Pass a constraint map to the query request.
-typedef std::map<std::string, struct ConstraintList> ConstraintMap;
+using ConstraintMap = std::map<std::string, struct ConstraintList>;
 /// Populate a constraint list from a query's parsed predicate.
-typedef std::vector<std::pair<std::string, struct Constraint> > ConstraintSet;
+using ConstraintSet = std::vector<std::pair<std::string, struct Constraint>>;
+
+/**
+ * @brief osquery table content descriptor.
+ *
+ * This object is the abstracted SQLite database's virtual table descriptor.
+ * When the virtual table is created/connected the name and columns are
+ * retrieved via the TablePlugin call API. The details are kept in this context
+ * so column parsing and row walking does not require additional Registry calls.
+ *
+ * When tables are accessed as the result of an SQL statement a QueryContext is
+ * created to represent metadata that can be used by the virtual table
+ * implementation code. Thus the code that generates rows can choose to emit
+ * additional data, restrict based on constraints, or potentially yield from
+ * a cache or choose not to generate certain columns.
+ */
+struct VirtualTableContent {
+  /// Friendly name for the table.
+  TableName name;
+  /// Table column structure, retrieved once via the TablePlugin call API.
+  TableColumns columns;
+  /// Transient set of virtual table access constraints.
+  std::unordered_map<size_t, ConstraintSet> constraints;
+
+  /*
+   * @brief A table implementation specific query result cache.
+   *
+   * Virtual tables may 'cache' information between filter requests. This is
+   * intended to provide optimization for very latent/expensive tables where
+   * complex joins may result in duplicate filter requests.
+   *
+   * The cache is implemented as a map of row data. The cache concept
+   * should utilize a primary key as an index, and may store arbitrary data.
+   * More intense caching may use the backing store though the general database
+   * set and get calls.
+   *
+   * The in-memory, non-backing store, cache is expired after each query run.
+   * This caching does not affect or use the schedule results cache.
+   */
+  std::map<std::string, Row> cache;
+};
 
 /**
  * @brief A QueryContext is provided to every table generator for optimization
  * on query components like predicate constraints and limits.
  */
-struct QueryContext {
+struct QueryContext : private boost::noncopyable {
+  /// Construct a context without cache support.
+  QueryContext() : enable_cache_(false), table_(new VirtualTableContent()) {}
+
+  /// If the context was created without content, it is ephemeral.
+  ~QueryContext() {
+    if (!enable_cache_) {
+      free(table_);
+    }
+  }
+
+  /// Construct a context and set the table content for caching.
+  explicit QueryContext(VirtualTableContent* content)
+      : enable_cache_(true), table_(content) {}
+
   /**
    * @brief Check if a constraint exists for a given column operator pair.
    *
@@ -343,6 +403,7 @@ struct QueryContext {
     }
   }
 
+  /// Helper for string type (most all types are TEXT/VARCHAR).
   void forEachConstraint(
       const std::string& column,
       ConstraintOperator op,
@@ -350,11 +411,74 @@ struct QueryContext {
     return forEachConstraint<std::string>(column, op, predicate);
   }
 
+  /**
+   * @brief Expand a list of constraints into a set of values.
+   *
+   * This is most (perhaps only) helpful with filesystem globbing inputs.
+   * The requirement is a constraint column that takes an expandable input.
+   * This method will accept an expand predicate and return the aggregate set of
+   * expanded items.
+   *
+   * In the future this will be a templated type that restricts the predicate
+   * to act on the column's affinite type and returns a similar-typed set.
+   *
+   * @param column The name of a column within this table.
+   * @param op An operator to retrieve from the constraint list.
+   * @param output The output parameter, a set of expanded values.
+   * @param predicate A predicate lambda to apply to each constraint.
+   * @return An aggregate status, if any predicate fails the operation fails.
+   */
+  Status expandConstraints(
+      const std::string& column,
+      ConstraintOperator op,
+      std::set<std::string>& output,
+      std::function<Status(const std::string& constraint,
+                           std::set<std::string>& output)> predicate);
+
+  /// Check if a table-defined index exists within the query cache.
+  bool isCached(const std::string& index) {
+    return (table_->cache.count(index) != 0);
+  }
+
+  /// Retrieve an index within the query cache.
+  const Row& getCache(const std::string& index) { return table_->cache[index]; }
+
+  /// Helper to retrieve a keyed element within the query cache.
+  const std::string& getCache(const std::string& index,
+                              const std::string& key) {
+    return table_->cache[index][key];
+  }
+
+  /// Set the entire cache for an index.
+  void setCache(const std::string& index, Row _cache) {
+    table_->cache[index] = std::move(_cache);
+  }
+
+  /// Helper to set a keyed element within the query cache.
+  void setCache(const std::string& index,
+                const std::string& key,
+                std::string _item) {
+    table_->cache[index][key] = std::move(_item);
+  }
+
+  /// The map of column name to constraint list.
   ConstraintMap constraints;
+
   /// Support a limit to the number of results.
   int limit{0};
+
   /// Is the table allowed to "traverse" directories.
   bool traverse{false};
+
+ private:
+  /// If false then the context is maintaining a ephemeral cache.
+  bool enable_cache_{false};
+
+  /// Persistent table content for table caching.
+  VirtualTableContent* table_{nullptr};
+
+ private:
+  friend class TablePlugin;
 };
 
 typedef struct QueryContext QueryContext;
@@ -399,7 +523,7 @@ class TablePlugin : public Plugin {
   std::string columnDefinition() const;
 
   /// Return the name and column pairs for attaching virtual tables.
-  PluginResponse routeInfo() const;
+  PluginResponse routeInfo() const override;
 
   /**
    * @brief Check if there are fresh cache results for this table.
@@ -471,7 +595,7 @@ class TablePlugin : public Plugin {
    * @param request The plugin request, must include an action key.
    * @param response A plugin response, for generation this contains the rows.
    */
-  Status call(const PluginRequest& request, PluginResponse& response);
+  Status call(const PluginRequest& request, PluginResponse& response) override;
 
  public:
   /// Helper data structure transformation methods.
@@ -499,6 +623,7 @@ class TablePlugin : public Plugin {
   static void removeExternal(const std::string& name);
 
  private:
+  friend class RegistryFactory;
   FRIEND_TEST(VirtualTableTests, test_tableplugin_columndefinition);
   FRIEND_TEST(VirtualTableTests, test_tableplugin_statement);
 };

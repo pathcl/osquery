@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-#  Copyright (c) 2014, Facebook, Inc.
+#  Copyright (c) 2014-present, Facebook, Inc.
 #  All rights reserved.
 #
 #  This source code is licensed under the BSD-style license found in the
@@ -98,7 +98,6 @@ function main_rhel() {
   set_cxx g++
 
   install_cmake
-  install_boost
 
   if [[ $DISTRO = "rhel6" ]]; then
     package libudev-devel
@@ -106,9 +105,6 @@ function main_rhel() {
   elif [[ $DISTRO = "rhel7" ]]; then
     package cryptsetup-devel
   fi
-
-  install_gflags
-  install_iptables_dev
 
   package doxygen
   package byacc
@@ -130,20 +126,32 @@ function main_rhel() {
     package automake
     package libtool
     package file-devel
+    package systemd-devel
   fi
+
+  install_boost
+  install_gflags
+  install_glog
+  install_google_benchmark
 
   install_snappy
   install_rocksdb
   install_thrift
   install_yara
+  install_asio
   install_cppnetlib
-  install_google_benchmark
+  install_sleuthkit
 
-  package device-mapper-devel
+  # Device mapper uses the exact version as the ABI.
+  # We will build and install a static version.
+  remove_package device-mapper-devel
+  install_device_mapper
+
   package libgcrypt-devel
   package gettext-devel
+
+  install_iptables_dev
   install_libcryptsetup
-  install_sleuthkit
 
   if [[ $DISTRO = "rhel7" ]]; then
     package audit-libs-devel
@@ -151,4 +159,6 @@ function main_rhel() {
   fi
 
   gem_install fpm
+
+  install_aws_sdk
 }

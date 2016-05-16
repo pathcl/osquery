@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -22,6 +22,8 @@
 #include <osquery/database.h>
 #include <osquery/filesystem.h>
 
+#include "osquery/core/process.h"
+
 namespace pt = boost::property_tree;
 
 namespace osquery {
@@ -29,7 +31,7 @@ namespace osquery {
 void initTesting();
 
 /// Cleanup/stop function for tests and benchmarks.
-void cleanupTesting();
+void shutdownTesting();
 
 /// Any SQL-dependent tests should use kTestQuery for a pre-populated example.
 const std::string kTestQuery = "SELECT * FROM test_table";
@@ -51,6 +53,7 @@ std::map<std::string, std::string> getTestConfigMap();
 
 pt::ptree getExamplePacksConfig();
 pt::ptree getUnrestrictedPack();
+pt::ptree getRestrictedPack();
 pt::ptree getPackWithDiscovery();
 pt::ptree getPackWithValidDiscovery();
 pt::ptree getPackWithFakeVersion();
@@ -116,6 +119,7 @@ std::vector<SplitStringTestData> generateSplitStringTestData();
 
 // generate a small directory structure for testing
 void createMockFileStructure();
+
 // remove the small directory structure used for testing
 void tearDownMockFileStructure();
 
@@ -127,22 +131,33 @@ class TLSServerRunner : private boost::noncopyable {
     return instance;
   }
 
+  /// Set associated flags for testing client TLS usage.
+  static void setClientConfig();
+
+  /// Unset or restore associated flags for testing client TLS usage.
+  static void unsetClientConfig();
+
   /// TCP port accessor.
   static const std::string& port() { return instance().port_; }
+
   /// Start the server if it hasn't started already.
   static void start();
+
   /// Stop the service when the process exits.
   static void stop();
 
  private:
-  TLSServerRunner()
-      : server_(0), port_(std::to_string(rand() % 10000 + 20000)){};
-  TLSServerRunner(TLSServerRunner const&);
-  void operator=(TLSServerRunner const&);
-  virtual ~TLSServerRunner() { stop(); }
+  /// Current server PID.
+  pid_t server_{0};
+
+  /// Current server TLS port.
+  std::string port_;
 
  private:
-  pid_t server_;
-  std::string port_;
+  std::string tls_hostname_;
+  std::string enroll_tls_endpoint_;
+  std::string tls_server_certs_;
+  std::string enroll_secret_path_;
 };
 }
+

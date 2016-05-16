@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -22,6 +22,17 @@
 namespace osquery {
 
 class Serializer;
+
+/**
+ * @brief Compress data using GZip.
+ *
+ * Requests API callers may request data be compressed before sending.
+ * The compression step occurs after serialization, immediately before the
+ * transport call.
+ *
+ * @param data The input/output mutable container.
+ */
+std::string compressString(const std::string& data);
 
 /**
  * @brief Abstract base class for remote transport implementations
@@ -64,10 +75,12 @@ class Transport {
    * @brief Send a simple request to the destination with parameters
    *
    * @param params A string representing the serialized parameters
+   * @param compress True of the request was requested to be compressed
    *
    * @return success or failure of the operation
    */
-  virtual Status sendRequest(const std::string& params) = 0;
+  virtual Status sendRequest(const std::string& params,
+                             bool compress = false) = 0;
 
   /**
    * @brief Get the status of the response
@@ -219,7 +232,8 @@ class Request {
     if (!s.ok()) {
       return s;
     }
-    return transport_->sendRequest(serialized);
+
+    return transport_->sendRequest(serialized, options_.get("compress", false));
   }
 
   /**
@@ -234,6 +248,7 @@ class Request {
 
   template <typename T>
   void setOption(const std::string& name, const T& value) {
+    options_.put(name, value);
     transport_->setOption(name, value);
   }
 
@@ -246,6 +261,9 @@ class Request {
 
   /// storage for the transport to be used
   std::shared_ptr<TTransport> transport_{nullptr};
+
+  /// options from request call (duplicated in transport)
+  boost::property_tree::ptree options_;
 
  private:
   FRIEND_TEST(TLSTransportsTests, test_call);

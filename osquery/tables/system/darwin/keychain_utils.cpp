@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -81,13 +81,38 @@ std::string genKIDProperty(const unsigned char* data, int len) {
   return key_id.str();
 }
 
-void genAlgorithmProperties(const X509* cert,
+void genAlgorithmProperties(X509* cert,
                             std::string& key,
-                            std::string& sig) {
+                            std::string& sig,
+                            std::string& size) {
   int nid = 0;
   OSX_OPENSSL(nid = OBJ_obj2nid(cert->cert_info->key->algor->algorithm));
   if (nid != NID_undef) {
     OSX_OPENSSL(key = std::string(OBJ_nid2ln(nid)));
+
+    // Get EVP public key, to determine public key size.
+    EVP_PKEY* pkey = nullptr;
+    OSX_OPENSSL(pkey = X509_get_pubkey(cert));
+    if (pkey != nullptr) {
+      if (nid == NID_rsaEncryption || nid == NID_dsa) {
+        size_t key_size = 0;
+        OSX_OPENSSL(key_size = EVP_PKEY_size(pkey));
+        size = std::to_string(key_size * 8);
+      }
+
+      // The EVP_size for EC keys returns the maximum buffer for storing the
+      // key data, it does not indicate the size/strength of the curve.
+      if (nid == NID_X9_62_id_ecPublicKey) {
+        const EC_KEY* ec_pkey = pkey->pkey.ec;
+        const EC_GROUP* ec_pkey_group = nullptr;
+        OSX_OPENSSL(ec_pkey_group = EC_KEY_get0_group(ec_pkey));
+        int curve_nid = 0;
+        OSX_OPENSSL(curve_nid = EC_GROUP_get_curve_name(ec_pkey_group));
+        if (curve_nid != NID_undef) {
+          OSX_OPENSSL(size = std::string(OBJ_nid2ln(curve_nid)));
+        }
+      }
+    }
   }
 
   OSX_OPENSSL(nid = OBJ_obj2nid(cert->cert_info->signature->algorithm));
@@ -96,9 +121,15 @@ void genAlgorithmProperties(const X509* cert,
   }
 }
 
-std::string genSHA1ForCertificate(const CFDataRef& raw_cert) {
-  return hashFromBuffer(
-      HASH_TYPE_SHA1, CFDataGetBytePtr(raw_cert), CFDataGetLength(raw_cert));
+std::string genSHA1ForCertificate(X509* cert) {
+  const EVP_MD* fprint_type = EVP_sha1();
+  unsigned char fprint[EVP_MAX_MD_SIZE] = {0};
+  unsigned int fprint_size = 0;
+
+  if (X509_digest(cert, fprint_type, fprint, &fprint_size)) {
+    return genKIDProperty(fprint, fprint_size);
+  }
+  return "";
 }
 
 bool CertificateIsCA(X509* cert) {
@@ -107,9 +138,32 @@ bool CertificateIsCA(X509* cert) {
   return (ca > 0);
 }
 
-void genCommonName(X509* cert, std::string& subject, std::string& common_name) {
+bool CertificateIsSelfSigned(X509* cert) {
+  bool self_signed = false;
+  OSX_OPENSSL(self_signed = (X509_check_issued(cert, cert) == X509_V_OK));
+  return self_signed;
+}
+
+void genCommonName(X509* cert,
+                   std::string& subject,
+                   std::string& common_name,
+                   std::string& issuer) {
   if (cert == nullptr) {
     return;
+  }
+
+  {
+    X509_NAME* issuerName = nullptr;
+    OSX_OPENSSL(issuerName = X509_get_issuer_name(cert));
+    if (issuerName != nullptr) {
+      // Generate the string representation of the issuer.
+      char* issuerBytes = nullptr;
+      OSX_OPENSSL(issuerBytes = X509_NAME_oneline(issuerName, nullptr, 0));
+      if (issuerBytes != nullptr) {
+        issuer = std::string(issuerBytes);
+        OSX_OPENSSL(OPENSSL_free(issuerBytes));
+      }
+    }
   }
 
   X509_NAME* subjectName = nullptr;
@@ -118,12 +172,14 @@ void genCommonName(X509* cert, std::string& subject, std::string& common_name) {
     return;
   }
 
-  // Generate the string representation of the subject.
-  char* subjectBytes = nullptr;
-  OSX_OPENSSL(subjectBytes = X509_NAME_oneline(subjectName, nullptr, 0));
-  if (subjectBytes != nullptr) {
-    subject = std::string(subjectBytes);
-    OSX_OPENSSL(OPENSSL_free(subjectBytes));
+  {
+    // Generate the string representation of the subject.
+    char* subjectBytes = nullptr;
+    OSX_OPENSSL(subjectBytes = X509_NAME_oneline(subjectName, nullptr, 0));
+    if (subjectBytes != nullptr) {
+      subject = std::string(subjectBytes);
+      OSX_OPENSSL(OPENSSL_free(subjectBytes));
+    }
   }
 
   int nid = 0;

@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -16,6 +16,7 @@
 #include <osquery/flags.h>
 #include <osquery/logger.h>
 
+#include "osquery/config/parsers/decorators.h"
 #include "osquery/database/query.h"
 #include "osquery/dispatcher/scheduler.h"
 #include "osquery/sql/sqlite_util.h"
@@ -47,15 +48,16 @@ inline SQL monitor(const std::string& name, const ScheduledQuery& query) {
       }
     }
     // Always called while processes table is working.
-    Config::getInstance().recordQueryPerformance(
-        name, t1 - t0, size, r0[0], r1[0]);
+    Config::getInstance().recordQueryPerformance(name, t1 - t0, size, r0[0],
+                                                 r1[0]);
   }
   return sql;
 }
 
-void launchQuery(const std::string& name, const ScheduledQuery& query) {
+inline void launchQuery(const std::string& name, const ScheduledQuery& query) {
   // Execute the scheduled query and create a named query object.
   VLOG(1) << "Executing query: " << query.query;
+  runDecorators(DECORATE_ALWAYS);
   auto sql =
       (FLAGS_enable_monitor) ? monitor(name, query) : SQLInternal(query.query);
 
@@ -75,6 +77,7 @@ void launchQuery(const std::string& name, const ScheduledQuery& query) {
   item.identifier = ident;
   item.time = osquery::getUnixTime();
   item.calendar_time = osquery::getAsciiTime();
+  getDecorations(item.decorations);
 
   if (query.options.count("snapshot") && query.options.at("snapshot")) {
     // This is a snapshot query, emit results with a differential or state.
@@ -128,21 +131,21 @@ void SchedulerRunner::start() {
             launchQuery(name, query);
           }
         }));
+    // Configuration decorators run on 60 second intervals only.
+    if (i % 60 == 0) {
+      runDecorators(DECORATE_INTERVAL, i);
+    }
     // Put the thread into an interruptible sleep without a config instance.
-    osquery::interruptableSleep(interval_ * 1000);
+    pauseMilli(interval_ * 1000);
+    if (interrupted()) {
+      break;
+    }
   }
 }
 
-Status startScheduler() {
-  if (startScheduler(FLAGS_schedule_timeout, 1).ok()) {
-    Dispatcher::joinServices();
-    return Status(0, "OK");
-  }
-  return Status(1, "Could not start scheduler");
-}
+void startScheduler() { startScheduler(FLAGS_schedule_timeout, 1); }
 
-Status startScheduler(unsigned long int timeout, size_t interval) {
+void startScheduler(unsigned long int timeout, size_t interval) {
   Dispatcher::addService(std::make_shared<SchedulerRunner>(timeout, interval));
-  return Status(0, "OK");
 }
 }

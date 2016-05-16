@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -105,7 +105,7 @@ class Status {
    *   }
    * @endcode
    */
-  operator bool() const { return ok(); }
+  /* explicit */ operator bool() const { return ok(); }
 
   // Below operator implementations useful for testing with gtest
 

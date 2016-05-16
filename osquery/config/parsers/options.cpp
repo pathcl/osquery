@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -45,6 +45,11 @@ Status OptionsConfigParserPlugin::update(const std::string& source,
     std::string value = options.get<std::string>(option.first, "");
     if (value.empty()) {
       continue;
+    }
+
+    if (Flag::getType(option.first).empty()) {
+      LOG(WARNING) << "Cannot set unknown or invalid flag: " << option.first;
+      return Status(1, "Unknown flag");
     }
 
     Flag::updateValue(option.first, value);

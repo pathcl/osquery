@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -12,8 +12,8 @@
 
 #include <map>
 #include <mutex>
-#include <vector>
 #include <set>
+#include <vector>
 
 #include <boost/noncopyable.hpp>
 #include <boost/property_tree/ptree.hpp>
@@ -125,6 +125,9 @@ struct ModuleInfo {
 
 /// The call-in prototype for Registry modules.
 using ModuleInitalizer = void (*)(void);
+
+/// The registry includes a single optimization for table generation.
+struct QueryContext;
 
 template <class PluginItem>
 class PluginFactory {};
@@ -272,6 +275,44 @@ class RegistryHelperCore : private boost::noncopyable {
   /// Allow a registry type to react to configuration updates.
   virtual void configure();
 
+  /**
+   * @brief Add a set of item names broadcasted by an extension uuid.
+   *
+   * When an extension is registered the RegistryFactory will receive a
+   * RegistryBroadcast containing a all of the extension's registry names and
+   * the set of items with their optional route info. The factory depends on
+   * each registry to manage calls/requests to these external plugins.
+   *
+   * @param uuid The uuid chosen for the extension.
+   * @param routes The plugin name and optional route info list.
+   * @return Success if all routes were added, failure if any failed.
+   */
+  Status addExternal(const RouteUUID& uuid, const RegistryRoutes& routes);
+
+  /**
+   * @brief Each RegistryType will include a trampoline into the PluginType.
+   *
+   * A PluginType may act on registry modifications. Each specialized registry
+   * will include a trampoline method to call the plugin type's addExternal.
+   *
+   * @param name Plugin name (not the extension UUID).
+   * @param info The route information broadcasted.
+   */
+  virtual Status addExternalPlugin(const std::string& name,
+                                   const PluginResponse& info) const = 0;
+
+  /// Remove all the routes for a given uuid.
+  void removeExternal(const RouteUUID& uuid);
+
+  /**
+   * @brief Each RegistryType will include a trampoline into the PluginType.
+   *
+   * A PluginType may act on registry modifications. Each specialized registry
+   * will include a trampoline method to call the plugin type's removeExternal.
+   * @param name Plugin name (not the extension UUID).
+   */
+  virtual void removeExternalPlugin(const std::string& name) const = 0;
+
   /// Facility method to check if a registry item exists.
   bool exists(const std::string& item_name, bool local = false) const;
 
@@ -316,7 +357,7 @@ class RegistryHelperCore : private boost::noncopyable {
 
  protected:
   /// A map of registered plugin instances to their registered identifier.
-  std::map<std::string, std::shared_ptr<Plugin> > items_;
+  std::map<std::string, std::shared_ptr<Plugin>> items_;
 
   /// If aliases are used, a map of alias to item name.
   std::map<std::string, std::string> aliases_;
@@ -337,6 +378,9 @@ class RegistryHelperCore : private boost::noncopyable {
 
   /// If a module was initialized/declared then store lookup information.
   std::map<std::string, RouteUUID> modules_;
+
+ private:
+  friend class RegistryFactory;
 };
 
 /**
@@ -357,49 +401,6 @@ class RegistryHelper : public RegistryHelperCore {
         add_(&RegistryType::addExternal),
         remove_(&RegistryType::removeExternal){};
   virtual ~RegistryHelper() {}
-
-  /**
-   * @brief Add a set of item names broadcasted by an extension uuid.
-   *
-   * When an extension is registered the RegistryFactory will receive a
-   * RegistryBroadcast containing a all of the extension's registry names and
-   * the set of items with their optional route info. The factory depends on
-   * each registry to manage calls/requests to these external plugins.
-   *
-   * @param uuid The uuid chosen for the extension.
-   * @param routes The plugin name and optional route info list.
-   * @return Success if all routes were added, failure if any failed.
-   */
-  Status addExternal(const RouteUUID& uuid, const RegistryRoutes& routes) {
-    // Add each route name (item name) to the tracking.
-    for (const auto& route : routes) {
-      // Keep the routes info assigned to the registry.
-      routes_[route.first] = route.second;
-      auto status = add_(route.first, route.second);
-      external_[route.first] = uuid;
-      if (!status.ok()) {
-        return status;
-      }
-    }
-    return Status(0, "OK");
-  }
-
-  /// Remove all the routes for a given uuid.
-  void removeExternal(const RouteUUID& uuid) {
-    std::vector<std::string> removed_items;
-    for (const auto& item : external_) {
-      if (item.second == uuid) {
-        remove_(item.first);
-        removed_items.push_back(item.first);
-      }
-    }
-
-    // Remove items belonging to the external uuid.
-    for (const auto& item : removed_items) {
-      external_.erase(item);
-      routes_.erase(item);
-    }
-  }
 
   /**
    * @brief Add a plugin to this registry by allocating and indexing
@@ -440,6 +441,18 @@ class RegistryHelper : public RegistryHelperCore {
     return std::dynamic_pointer_cast<RegistryType>(items_.at(item_name));
   }
 
+  /// Trampoline function for calling the PluginType's addExternal.
+  Status addExternalPlugin(const std::string& name,
+                           const PluginResponse& info) const override {
+    return add_(name, info);
+  }
+
+  /// Trampoline function for calling the PluginType's removeExternal.
+  void removeExternalPlugin(const std::string& name) const override {
+    remove_(name);
+  }
+
+  /// Construct and return a map of plugin names to their implementation.
   const std::map<std::string, RegistryTypeRef> all() const {
     std::map<std::string, RegistryTypeRef> ditems;
     for (const auto& item : items_) {
@@ -449,6 +462,19 @@ class RegistryHelper : public RegistryHelperCore {
     return ditems;
   }
 
+ protected:
+  /**
+   * @brief Add an existing plugin to this registry, used for testing only.
+   *
+   * @param item A PluginType-cased registry item.
+   * @param item_name An identifier for this registry plugin.
+   * @return A success/failure status.
+   */
+  Status add(const std::shared_ptr<RegistryType>& item) {
+    items_[item->getName()] = item;
+    return RegistryHelperCore::add(item->getName(), true);
+  }
+
  public:
   RegistryHelper(RegistryHelper const&) = delete;
   void operator=(RegistryHelper const&) = delete;
@@ -456,12 +482,17 @@ class RegistryHelper : public RegistryHelperCore {
  private:
   AddExternalCallback add_;
   RemoveExternalCallback remove_;
+
+ private:
+  FRIEND_TEST(EventsTests, test_event_subscriber_configure);
 };
 
-/// Helper defintion for a shared pointer to a Plugin.
+/// Helper definition for a shared pointer to a Plugin.
 using PluginRef = std::shared_ptr<Plugin>;
+
 /// Helper definition for a basic-templated Registry type using a base Plugin.
 using PluginRegistryHelper = RegistryHelper<Plugin>;
+
 /// Helper definitions for a shared pointer to the basic Registry type.
 using PluginRegistryHelperRef = std::shared_ptr<PluginRegistryHelper>;
 
@@ -637,6 +668,11 @@ class RegistryFactory : private boost::noncopyable {
   static Status call(const std::string& registry_name,
                      const PluginRequest& request);
 
+  /// A helper call optimized for table data generation.
+  static Status callTable(const std::string& table_name,
+                          QueryContext& context,
+                          PluginResponse& response);
+
   /// Set a registry's active plugin.
   static Status setActive(const std::string& registry_name,
                           const std::string& item_name);
@@ -757,6 +793,9 @@ class RegistryFactory : private boost::noncopyable {
   /// This will cause extension-internal events to forward to osquery core.
   bool external_{false};
 
+  /// Protector for broadcast lookups and external registry mutations.
+  mutable Mutex mutex_;
+
  private:
   friend class RegistryHelperCore;
   friend class RegistryModuleLoader;
@@ -773,5 +812,5 @@ class RegistryFactory : private boost::noncopyable {
  * The actual plugins must add themselves to a registry type and should
  * implement the Plugin and RegistryType interfaces.
  */
-class Registry : public RegistryFactory {};
+using Registry = RegistryFactory;
 }

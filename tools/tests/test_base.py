@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-#  Copyright (c) 2014, Facebook, Inc.
+#  Copyright (c) 2014-present, Facebook, Inc.
 #  All rights reserved.
 #
 #  This source code is licensed under the BSD-style license found in the
@@ -54,7 +54,7 @@ except ImportError:
 
 '''Defaults that should be used in integration tests.'''
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
-CONFIG_DIR = "/tmp/osquery-tests/"
+CONFIG_DIR = "/tmp/osquery-tests-python%d/" % (os.getuid())
 CONFIG_NAME = CONFIG_DIR + "tests"
 DEFAULT_CONFIG = {
     "options": {
@@ -165,8 +165,10 @@ class ProcRunner(object):
         pid = 0
         try:
             if self.silent:
-                self.proc = subprocess.Popen([self.path] + self.args,
-                                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                self.proc = subprocess.Popen(
+                    [self.path] + self.args,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE)
             else:
                 self.proc = subprocess.Popen([self.path] + self.args)
             pid = self.proc.pid
@@ -418,8 +420,7 @@ class TimeoutRunner(object):
     def __init__(self, cmd=[], timeout_sec=1):
         self.stdout = None
         self.stderr = None
-        self.proc = subprocess.Popen(" ".join(cmd),
-                                     shell=True,
+        self.proc = subprocess.Popen(cmd,
                                      stdout=subprocess.PIPE,
                                      stderr=subprocess.PIPE)
         kill_proc = lambda p: p.kill()
@@ -429,7 +430,11 @@ class TimeoutRunner(object):
         timer.cancel()
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 =======
+=======
+
+>>>>>>> 9c01d4a6e348a53b30e9aa8ea256e80918d1cea9
 def flaky(gen):
     exceptions = []
     def attempt(this):
@@ -455,6 +460,7 @@ def flaky(gen):
         raise exceptions[0][0]
     return wrapper
 >>>>>>> 769a723b5ccb97037b678a874480f37beb2281c6
+
 
 class Tester(object):
 
@@ -587,6 +593,16 @@ def assertPermissions():
         print(utils.lightred("Repository owner (%d) executer (%d) mismatch" % (
             stat_info.st_uid, os.getuid())))
         exit(1)
+
+
+def getTestDirectory(base):
+    path = os.path.join(base, "test-dir" + str(random.randint(1000, 9999)))
+    try:
+        shutil.rmtree(path)
+    except:
+        pass
+    os.makedirs(path)
+    return path
 
 
 def loadThriftFromBuild(build_dir):

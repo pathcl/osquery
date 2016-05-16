@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -80,8 +80,9 @@ class CQueue : private boost::noncopyable {
    *
    * This allow the two view of the buffer to maintain consistency.
    *
-   * @param options Options to be passed to the kernel.  Primarily used for
-   *   OSQUERY_NO_BLOCK, which allows the sync to not block if there is no data.
+   * @param options Options to be passed to the kernel. Primarily used for
+   *   OSQUERY_OPTIONS_NO_BLOCK, which allows the sync to not block if there is
+   *   no data.
    * @return Returns the number of dropped events, or negative if too many.
    */
   int kernelSync(int options);

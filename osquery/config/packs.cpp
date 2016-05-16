@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -109,28 +109,28 @@ void Pack::initialize(const std::string& name,
                       const pt::ptree& tree) {
   name_ = name;
   source_ = source;
+  // Check the shard limitation, shards falling below this value are included.
   if (tree.count("shard") > 0) {
     shard_ = tree.get<size_t>("shard", 0);
   }
 
+  // Check for a platform restriction.
   platform_.clear();
   if (tree.count("platform") > 0) {
     platform_ = tree.get<std::string>("platform", "");
   }
 
+  // Check for a version restriction.
   version_.clear();
   if (tree.count("version") > 0) {
     version_ = tree.get<std::string>("version", "");
   }
 
+  // Apply the shard, platform, and version checking.
+  // It is important to set each value such that the packs meta-table can report
+  // each of the restrictions.
   if ((shard_ > 0 && shard_ < getMachineShard()) || !checkPlatform() ||
       !checkVersion()) {
-    return;
-  }
-
-  schedule_.clear();
-  if (tree.count("queries") == 0) {
-    // This pack contained no queries.
     return;
   }
 
@@ -143,10 +143,17 @@ void Pack::initialize(const std::string& name,
 
   // Initialize a discovery cache at time 0.
   discovery_cache_ = std::make_pair<size_t, bool>(0, false);
+  valid_ = true;
 
   // If the splay percent is less than 1 reset to a sane estimate.
   if (FLAGS_schedule_splay_percent <= 1) {
     FLAGS_schedule_splay_percent = 10;
+  }
+
+  schedule_.clear();
+  if (tree.count("queries") == 0) {
+    // This pack contained no queries.
+    return;
   }
 
   // Iterate the queries (or schedule) and check platform/version/sanity.
@@ -201,7 +208,7 @@ const std::string& Pack::getPlatform() const { return platform_; }
 
 const std::string& Pack::getVersion() const { return version_; }
 
-bool Pack::shouldPackExecute() { return checkDiscovery(); }
+bool Pack::shouldPackExecute() { return (valid_ && checkDiscovery()); }
 
 const std::string& Pack::getName() const { return name_; }
 

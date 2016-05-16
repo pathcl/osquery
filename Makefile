@@ -1,6 +1,10 @@
 PLATFORM := $(shell uname -s)
-VERSION := $(shell git describe --tags HEAD --always)
+BASH_EXISTS := $(shell which bash)
 SHELL := $(shell which bash)
+
+ifneq ($(MAKECMDGOALS),deps)
+GIT_EXISTS := $(shell which git)
+endif
 
 MAKE = make
 ifeq ($(PLATFORM),FreeBSD)
@@ -10,11 +14,11 @@ endif
 DISTRO := $(shell . ./tools/lib.sh; _platform)
 DISTRO_VERSION := $(shell . ./tools/lib.sh; _distro $(DISTRO))
 ifeq ($(DISTRO),darwin)
-  ifeq ($(DISTRO_VERSION), 10.10)
-    BUILD_DIR = darwin
-  else
-    BUILD_DIR = darwin$(DISTRO_VERSION)
-  endif
+	ifeq ($(DISTRO_VERSION), 10.11)
+		BUILD_DIR = darwin
+	else
+		BUILD_DIR = darwin$(DISTRO_VERSION)
+	endif
 else ifeq ($(DISTRO),freebsd)
 	BUILD_DIR = freebsd$(DISTRO_VERSION)
 else
@@ -34,7 +38,7 @@ docs: .setup
 
 debug: .setup
 	cd build/debug_$(BUILD_DIR) && DEBUG=True cmake ../../ && \
-	  $(DEFINES) $(MAKE) --no-print-directory $(MAKEFLAGS)
+		$(DEFINES) $(MAKE) --no-print-directory $(MAKEFLAGS)
 
 test_debug: .setup
 	cd build/debug_$(BUILD_DIR) && DEBUG=True cmake ../../ && \
@@ -87,6 +91,9 @@ clean: .setup
 	cd build/$(BUILD_DIR) && cmake ../../ && \
 		$(DEFINES) $(MAKE) clean --no-print-directory $(MAKEFLAGS)
 
+strip: .setup
+	cd build/$(BUILD_DIR) && find ./osquery -executable -type f | xargs strip
+
 distclean:
 	rm -rf .sources build/$(BUILD_DIR) build/debug_$(BUILD_DIR) build/docs
 ifeq ($(PLATFORM),Linux)
@@ -94,16 +101,27 @@ ifeq ($(PLATFORM),Linux)
 endif
 
 .setup:
+ifneq ($(MAKECMDGOALS),deps)
+ifeq ($(GIT_EXISTS),)
+	@echo "Problem: cannot find 'git'"
+	@false
+endif
+endif
+ifeq ($(BASH_EXISTS),)
+	@echo "Problem: cannot find 'bash'"
+	@false
+endif
+
 ifeq ($(DISTRO),unknown_version)
 	@echo Unknown, non-Redhat, non-Ubuntu based Linux distro
-	false
+	@false
 endif
 	@mkdir -p build/docs
 	@mkdir -p build/$(BUILD_DIR)
 	@mkdir -p build/debug_$(BUILD_DIR)
 ifeq ($(PLATFORM),Linux)
-		@ln -snf $(BUILD_DIR) build/linux
-		@ln -snf debug_$(BUILD_DIR) build/debug_linux
+	@ln -snf $(BUILD_DIR) build/linux
+	@ln -snf debug_$(BUILD_DIR) build/debug_linux
 endif
 
 package: .setup
@@ -111,8 +129,16 @@ package: .setup
 	cd build/$(BUILD_DIR) && PACKAGE=True cmake ../../ && \
 		$(DEFINES) $(MAKE) packages --no-print-directory $(MAKEFLAGS)
 
+debug_package: .setup
+	cd build/debug_$(BUILD_DIR) && DEBUG=True PACKAGE=True cmake ../../ && \
+		$(DEFINES) $(MAKE) packages --no-print-directory $(MAKEFLAGS)
+
 packages: .setup
 	cd build/$(BUILD_DIR) && PACKAGE=True cmake ../../ && \
+		$(DEFINES) $(MAKE) packages --no-print-directory $(MAKEFLAGS)
+
+debug_packages:
+	cd build/debug_$(BUILD_DIR) && DEBUG=True PACKAGE=True cmake ../../ && \
 		$(DEFINES) $(MAKE) packages --no-print-directory $(MAKEFLAGS)
 
 sync: .setup

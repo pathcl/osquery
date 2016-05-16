@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -165,7 +165,7 @@ QueryData genXProtectEntries(QueryContext& context) {
     }
   }
 
-  return std::move(results);
+  return results;
 }
 
 QueryData genXProtectMeta(QueryContext& context) {
@@ -214,7 +214,7 @@ QueryData genXProtectMeta(QueryContext& context) {
     }
   }
 
-  return std::move(results);
+  return results;
 }
 }
 }

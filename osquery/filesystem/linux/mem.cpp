@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -96,6 +96,7 @@ Status readRawMem(size_t base, size_t length, void** buffer) {
     if (!readMem(fd, base, length, (uint8_t*)*buffer).ok()) {
       close(fd);
       free(*buffer);
+      *buffer = nullptr;
       return Status(1, "Cannot memory map or seek/read memory");
     }
   } else {

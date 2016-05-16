@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -55,6 +55,8 @@ FLAG(string,
      "hostname",
      "Field used to identify the host running osquery (hostname, uuid)");
 
+FLAG(bool, utc, false, "Convert all UNIX times to UTC");
+
 std::string getHostname() {
   static long max_hostname = sysconf(_SC_HOST_NAME_MAX);
   long size = (max_hostname > 255) ? max_hostname + 1 : 256;
@@ -71,44 +73,44 @@ std::string getHostname() {
   return hostname_string;
 }
 
-std::string generateNewUuid() {
+std::string generateNewUUID() {
   boost::uuids::uuid uuid = boost::uuids::random_generator()();
   return boost::uuids::to_string(uuid);
+}
+
+std::string generateHostUUID() {
+#ifdef __APPLE__
+  // Use the hardware UUID available on OSX to identify this machine
+  uuid_t id;
+  // wait at most 5 seconds for gethostuuid to return
+  const timespec wait = {5, 0};
+  int result = gethostuuid(id, &wait);
+  if (result == 0) {
+    char out[128] = {0};
+    uuid_unparse(id, out);
+    std::string uuid_string = std::string(out);
+    boost::algorithm::trim(uuid_string);
+    return uuid_string;
+  } else {
+    // Unable to get the hardware UUID, just return a new UUID
+    return generateNewUUID();
+  }
+#else
+  return generateNewUUID();
+#endif
 }
 
 Status getHostUUID(std::string& ident) {
   // Lookup the host identifier (UUID) previously generated and stored.
   auto status = getDatabaseValue(kPersistentSettings, "hostIdentifier", ident);
   if (ident.size() == 0) {
-    // There was no uuid stored in the database, generate one and store it.
-    ident = osquery::generateHostUuid();
-    VLOG(1) << "Using uuid " << ident << " as host identifier";
+    // There was no UUID stored in the database, generate one and store it.
+    ident = osquery::generateHostUUID();
+    VLOG(1) << "Using UUID " << ident << " as host identifier";
     return setDatabaseValue(kPersistentSettings, "hostIdentifier", ident);
   }
 
   return status;
-}
-
-std::string generateHostUuid() {
-#ifdef __APPLE__
-  // Use the hardware uuid available on OSX to identify this machine
-  uuid_t id;
-  // wait at most 5 seconds for gethostuuid to return
-  const timespec wait = {5, 0};
-  int result = gethostuuid(id, &wait);
-  if (result == 0) {
-    char out[128];
-    uuid_unparse(id, out);
-    std::string uuid_string = std::string(out);
-    boost::algorithm::trim(uuid_string);
-    return uuid_string;
-  } else {
-    // unable to get the hardware uuid, just return a new uuid
-    return generateNewUuid();
-  }
-#else
-  return generateNewUuid();
-#endif
 }
 
 std::string getHostIdentifier() {
@@ -120,15 +122,8 @@ std::string getHostIdentifier() {
   // Generate a identifier/UUID for this application launch, and persist.
   static std::string ident;
   if (ident.size() == 0) {
-    // Lookup the host identifier (UUID) previously generated and stored.
-    getDatabaseValue(kPersistentSettings, "hostIdentifier", ident);
-    if (ident.size() == 0) {
-      ident = osquery::generateHostUuid();
-      VLOG(1) << "Using uuid " << ident << " as host identifier";
-      setDatabaseValue(kPersistentSettings, "hostIdentifier", ident);
-    }
+    getHostUUID(ident);
   }
-
   return ident;
 }
 
@@ -141,6 +136,9 @@ std::string getAsciiTime() {
 
 size_t getUnixTime() {
   auto result = std::time(nullptr);
+  if (FLAGS_utc) {
+    result = std::mktime(std::gmtime(&result));
+  }
   return result;
 }
 
@@ -283,9 +281,15 @@ bool DropPrivileges::dropTo(uid_t uid, gid_t gid) {
   } else if (dropped()) {
     return false;
   }
+
   /// Drop process groups.
-  original_groups_ = (gid_t*)malloc(NGROUPS_MAX * sizeof(gid_t));
-  group_size_ = getgroups(NGROUPS_MAX, original_groups_);
+  if (original_groups_ != nullptr) {
+    restoreGroups();
+  }
+
+  group_size_ = getgroups(0, nullptr);
+  original_groups_ = (gid_t*)malloc(group_size_ * sizeof(gid_t));
+  group_size_ = getgroups(group_size_, original_groups_);
   setgroups(1, &gid);
   if (setegid(gid) != 0) {
     return false;
@@ -299,6 +303,13 @@ bool DropPrivileges::dropTo(uid_t uid, gid_t gid) {
   to_group_ = gid;
   dropped_ = true;
   return true;
+}
+
+void DropPrivileges::restoreGroups() {
+  setgroups(group_size_, original_groups_);
+  group_size_ = 0;
+  free(original_groups_);
+  original_groups_ = nullptr;
 }
 
 DropPrivileges::~DropPrivileges() {
@@ -318,10 +329,7 @@ DropPrivileges::~DropPrivileges() {
   }
 
   if (original_groups_ != nullptr) {
-    setgroups(group_size_, original_groups_);
-    group_size_ = 0;
-    free(original_groups_);
-    original_groups_ = nullptr;
+    restoreGroups();
   }
 }
 }

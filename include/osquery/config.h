@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -130,7 +130,7 @@ class Config : private boost::noncopyable {
   /**
    * @brief Iterate through all packs
    */
-  void packs(std::function<void(Pack& pack)> predicate);
+  void packs(std::function<void(std::shared_ptr<Pack>& pack)> predicate);
 
   /**
    * @brief Add a file
@@ -160,8 +160,9 @@ class Config : private boost::noncopyable {
    *      }));
    * @endcode
    */
-  void scheduledQueries(std::function<
-      void(const std::string& name, const ScheduledQuery& query)> predicate);
+  void scheduledQueries(
+      std::function<void(const std::string& name, const ScheduledQuery& query)>
+          predicate);
 
   /**
    * @brief Map a function across the set of configured files
@@ -225,7 +226,45 @@ class Config : private boost::noncopyable {
   Status load();
 
   /// A step method for Config::update.
-  Status updateSource(const std::string& name, const std::string& json);
+  Status updateSource(const std::string& source, const std::string& json);
+
+  /**
+   * @brief Generate pack content from a resource handled by the Plugin.
+   *
+   * Configuration content may set pack values to JSON strings instead of an
+   * embedded dictionary representing the pack content. When a string is
+   * encountered the config assumes this is a 'resource' handled by the Plugin.
+   *
+   * The value, or target, is sent to the ConfigPlugin via a registry request.
+   * The plugin response is assumed, and used, as the pack content.
+   *
+   * @param name A pack name provided and handled by the ConfigPlugin.
+   * @param source The config content source identifier.
+   * @param target A resource (path, URL, etc) handled by the ConfigPlugin.
+   * @return status On success the response will be JSON parsed.
+   */
+  Status genPack(const std::string& name,
+                 const std::string& source,
+                 const std::string& target);
+
+  /**
+   * @brief Apply each ConfigParser to an input property tree.
+   *
+   * This iterates each discovered ConfigParser Plugin and the plugin's keys
+   * to match keys within the input property tree. If a key matches then the
+   * associated value is passed to the parser.
+   *
+   * Use this utility method for both the top-level configuration tree and
+   * the content of each configuration pack. There is an optional black list
+   * parameter to differentiate pack content.
+   *
+   * @param source The input configuration source name.
+   * @param tree The input configuration tree.
+   * @param pack True if the tree was built from pack data, otherwise false.
+   */
+  void applyParsers(const std::string& source,
+                    const boost::property_tree::ptree& tree,
+                    bool pack = false);
 
   /**
    * @brief When config sources are updated the config will 'purge'.
@@ -238,6 +277,11 @@ class Config : private boost::noncopyable {
    */
   void purge();
 
+  /**
+   * @brief Reset the configuration state, reserved for testing only.
+   */
+  void reset();
+
  protected:
   /// Schedule of packs and their queries.
   std::shared_ptr<Schedule> schedule_;
@@ -246,7 +290,7 @@ class Config : private boost::noncopyable {
   std::map<std::string, QueryPerformance> performance_;
 
   /// A set of named categories filled with filesystem globbing paths.
-  using FileCategories = std::map<std::string, std::vector<std::string> >;
+  using FileCategories = std::map<std::string, std::vector<std::string>>;
   std::map<std::string, FileCategories> files_;
 
   /// A set of hashes for each source of the config.
@@ -266,19 +310,17 @@ class Config : private boost::noncopyable {
   friend class Initializer;
 
  private:
-  FRIEND_TEST(ConfigTests, test_plugin_reconfigure);
-  FRIEND_TEST(ConfigTests, test_parse);
-  FRIEND_TEST(ConfigTests, test_remove);
-  FRIEND_TEST(ConfigTests, test_get_scheduled_queries);
-  FRIEND_TEST(ConfigTests, test_get_parser);
-  FRIEND_TEST(ConfigTests, test_add_remove_pack);
-  FRIEND_TEST(ConfigTests, test_noninline_pack);
-
+  friend class ConfigTests;
+  friend class FilePathsConfigParserPluginTests;
+  friend class FileEventsTableTests;
+  friend class DecoratorsConfigParserPluginTests;
+  friend class SchedulerTests;
   FRIEND_TEST(OptionsConfigParserPluginTests, test_get_option);
-  FRIEND_TEST(FilePathsConfigParserPluginTests, test_get_files);
+  FRIEND_TEST(EventsConfigParserPluginTests, test_get_event);
   FRIEND_TEST(PacksTests, test_discovery_cache);
   FRIEND_TEST(SchedulerTests, test_monitor);
   FRIEND_TEST(SchedulerTests, test_config_results_purge);
+  FRIEND_TEST(EventsTests, test_event_subscriber_configure);
 };
 
 /**
@@ -428,13 +470,30 @@ class ConfigParserPlugin : public Plugin {
   virtual Status update(const std::string& source,
                         const ParserConfig& config) = 0;
 
+  /// Allow parsers to perform some setup before the configuration is loaded.
   Status setUp() override;
 
+  /**
+   * @brief Accessor for parser-manipulated data.
+   *
+   * Parsers should be used generically, for places within the code base that
+   * request a parser (check for its existence), should only use this ::getData
+   * accessor.
+   *
+   * More complex parsers that require dynamic casting are not recommended.
+   */
   const boost::property_tree::ptree& getData() const { return data_; }
+
+ protected:
+  /// Allow the config to request parser state resets.
+  virtual void reset();
 
  protected:
   /// Allow the config parser to keep some global state.
   boost::property_tree::ptree data_;
+
+ private:
+  friend class Config;
 };
 
 /**

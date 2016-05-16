@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -10,7 +10,6 @@
 
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
-#include <boost/thread.hpp>
 
 #include <gtest/gtest.h>
 
@@ -19,8 +18,10 @@
 #include <osquery/flags.h>
 #include <osquery/tables.h>
 
-#include "osquery/events/darwin/fsevents.h"
 #include "osquery/core/test_util.h"
+#include "osquery/events/darwin/fsevents.h"
+
+namespace fs = boost::filesystem;
 
 namespace osquery {
 
@@ -31,20 +32,31 @@ DECLARE_bool(verbose);
 class FSEventsTests : public testing::Test {
  protected:
   void SetUp() override {
+    // FSEvents will use data from the config and config parsers.
+    Registry::registry("config_parser")->setUp();
+
     FLAGS_verbose = true;
-    trigger_path = kTestWorkingDirectory + "fsevents" +
-                   std::to_string(rand() % 10000 + 10000);
+    real_test_path = kTestWorkingDirectory + "fsevents-triggers" +
+                     std::to_string(rand() % 10000 + 10000);
+    // Create a similar directory for embedded paths and directories.
+    real_test_dir = kTestWorkingDirectory + "fsevents-triggers" +
+                    std::to_string(rand() % 10000 + 10000);
   }
 
-  void TearDown() override { remove(trigger_path); }
+  void TearDown() override {
+    remove(real_test_path);
+    fs::remove_all(real_test_dir);
+  }
 
   void StartEventLoop() {
     event_pub_ = std::make_shared<FSEventsEventPublisher>();
+    event_pub_->no_defer_ = true;
+    event_pub_->no_self_ = false;
     EventFactory::registerEventPublisher(event_pub_);
-    FILE* fd = fopen(trigger_path.c_str(), "w");
+    FILE* fd = fopen(real_test_path.c_str(), "w");
     fclose(fd);
 
-    temp_thread_ = boost::thread(EventFactory::run, "fsevents");
+    temp_thread_ = std::thread(EventFactory::run, "fsevents");
     // Wait for the publisher thread and FSEvent run loop to start.
   }
 
@@ -58,7 +70,7 @@ class FSEventsTests : public testing::Test {
 
   void WaitForStream(int max) {
     int delay = 0;
-    while (delay < max * 1000) {
+    while (delay < max * 1000 * 2) {
       if (event_pub_->isStreamRunning()) {
         return;
       }
@@ -84,21 +96,22 @@ class FSEventsTests : public testing::Test {
   void CreateEvents(int num = 1) {
     WaitForStream(kMaxEventLatency);
     for (int i = 0; i < num; ++i) {
-      FILE* fd = fopen(trigger_path.c_str(), "a");
+      FILE* fd = fopen(real_test_path.c_str(), "a");
       fputs("fsevents", fd);
       fclose(fd);
     }
+    event_pub_->flush();
   }
 
+  size_t count{0};
   std::shared_ptr<FSEventsEventPublisher> event_pub_{nullptr};
-  boost::thread temp_thread_;
+  std::thread temp_thread_;
 
  public:
   /// Trigger path is the current test's eventing sink (accessed anywhere).
-  static std::string trigger_path;
+  std::string real_test_path;
+  std::string real_test_dir;
 };
-
-std::string FSEventsTests::trigger_path = kTestWorkingDirectory + "fsevents";
 
 TEST_F(FSEventsTests, test_register_event_pub) {
   auto pub = std::make_shared<FSEventsEventPublisher>();
@@ -168,16 +181,17 @@ class TestFSEventsEventSubscriber
     return Status(0, "OK");
   }
 
-  Status SimpleCallback(const ECRef& ec, const SCRef& sc) {
-    callback_count_ += 1;
-    return Status(0, "OK");
-  }
-
-  SCRef GetSubscription(uint32_t mask = 0) {
+  SCRef GetSubscription(const std::string& path, uint32_t mask = 0) {
     auto sc = createSubscriptionContext();
-    sc->path = FSEventsTests::trigger_path;
+    sc->path = path;
     sc->mask = mask;
     return sc;
+  }
+
+  Status SimpleCallback(const ECRef& ec, const SCRef& sc) {
+    WriteLock lock(mutex_);
+    callback_count_ += 1;
+    return Status(0, "OK");
   }
 
   Status Callback(const ECRef& ec, const SCRef& sc) {
@@ -187,6 +201,7 @@ class TestFSEventsEventSubscriber
     // r["path"] = ec->path;
 
     // Normally would call Add here.
+    WriteLock lock(mutex_);
     actions_.push_back(ec->action);
     callback_count_ += 1;
     return Status(0, "OK");
@@ -195,8 +210,11 @@ class TestFSEventsEventSubscriber
   void WaitForEvents(int max, int initial = 0) {
     int delay = 0;
     while (delay < max * 1000) {
-      if (callback_count_ >= initial) {
-        return;
+      {
+        WriteLock lock(mutex_);
+        if (callback_count_ >= initial) {
+          return;
+        }
       }
       delay += 100;
       ::usleep(100);
@@ -207,9 +225,13 @@ class TestFSEventsEventSubscriber
   int callback_count_{0};
   std::vector<std::string> actions_;
 
+ public:
+  mutable Mutex mutex_;
+
  private:
   FRIEND_TEST(FSEventsTests, test_fsevents_fire_event);
   FRIEND_TEST(FSEventsTests, test_fsevents_event_action);
+  FRIEND_TEST(FSEventsTests, test_fsevents_embedded_wildcards);
 };
 
 TEST_F(FSEventsTests, test_fsevents_run) {
@@ -223,13 +245,13 @@ TEST_F(FSEventsTests, test_fsevents_run) {
 
   // Create a subscriptioning context
   auto mc = std::make_shared<FSEventsSubscriptionContext>();
-  mc->path = trigger_path;
+  mc->path = real_test_path;
   EventFactory::addSubscription(
       "fsevents", Subscription::create("TestFSEventsEventSubscriber", mc));
   event_pub_->configure();
 
   // Create an event loop thread (similar to main)
-  temp_thread_ = boost::thread(EventFactory::run, "fsevents");
+  temp_thread_ = std::thread(EventFactory::run, "fsevents");
   EXPECT_TRUE(event_pub_->numEvents() == 0);
 
   // Wait for the thread to start and the FSEvents stream to turn on.
@@ -242,7 +264,6 @@ TEST_F(FSEventsTests, test_fsevents_run) {
   WaitForEvents(kMaxEventLatency);
 
   EXPECT_TRUE(event_pub_->numEvents() > 0);
-
   // We are managing the thread ourselves, so no join needed.
   EventFactory::end(false);
   temp_thread_.join();
@@ -257,13 +278,14 @@ TEST_F(FSEventsTests, test_fsevents_fire_event) {
   EventFactory::registerEventSubscriber(sub);
 
   // Create a subscriptioning context, note the added Event to the symbol
-  auto sc = sub->GetSubscription(0);
+  auto sc = sub->GetSubscription(real_test_path, 0);
   sub->subscribe(&TestFSEventsEventSubscriber::SimpleCallback, sc);
   event_pub_->configure();
   CreateEvents();
 
   // This time wait for the callback.
-  sub->WaitForEvents(kMaxEventLatency, 1);
+  sub->WaitForEvents(kMaxEventLatency, count + 1);
+  count = event_pub_->numEvents();
 
   // Make sure our expected event fired (aka subscription callback was called).
   EXPECT_TRUE(sub->callback_count_ > 0);
@@ -278,41 +300,80 @@ TEST_F(FSEventsTests, test_fsevents_event_action) {
   auto sub = std::make_shared<TestFSEventsEventSubscriber>();
   auto status = sub->init();
 
-  auto sc = sub->GetSubscription(0);
+  auto sc = sub->GetSubscription(real_test_path, 0);
   EventFactory::registerEventSubscriber(sub);
 
   sub->subscribe(&TestFSEventsEventSubscriber::Callback, sc);
   event_pub_->configure();
 
   CreateEvents();
-  sub->WaitForEvents(kMaxEventLatency, 1);
+  sub->WaitForEvents(kMaxEventLatency, count + 1);
+  count = event_pub_->numEvents();
 
   // Make sure the fsevents action was expected.
   ASSERT_TRUE(sub->actions_.size() > 0);
   bool has_created = false;
   bool has_unknown = false;
-  for (const auto& action : sub->actions_) {
-    // Expect either a created event or attributes modified event.
-    if (action == "CREATED" || action == "ATTRIBUTES_MODIFIED") {
-      has_created = true;
-    } else if (action == "UNKNOWN" || action == "") {
-      // Allow an undetermined but existing FSevent on our target to pass.
-      has_unknown = true;
+  {
+    WriteLock lock(sub->mutex_);
+    for (const auto& action : sub->actions_) {
+      // Expect either a created event or attributes modified event.
+      if (action == "CREATED" || action == "ATTRIBUTES_MODIFIED") {
+        has_created = true;
+      } else if (action == "UNKNOWN" || action == "") {
+        // Allow an undetermined but existing FSevent on our target to pass.
+        has_unknown = true;
+      }
     }
   }
   EXPECT_TRUE(has_created || has_unknown);
+  {
+    WriteLock lock(sub->mutex_);
+    sub->actions_.clear();
+  }
 
+  // Generate more events.
   CreateEvents();
-  sub->WaitForEvents(kMaxEventLatency, 2);
+  sub->WaitForEvents(kMaxEventLatency, count + 2);
+  count = event_pub_->numEvents();
+
   bool has_updated = false;
-  // We may have triggered several updated events.
-  for (const auto& action : sub->actions_) {
-    if (action == "UPDATED") {
-      has_updated = true;
+  {
+    WriteLock lock(sub->mutex_);
+    // We may have triggered several updated events.
+    for (const auto& action : sub->actions_) {
+      if (action == "UPDATED") {
+        has_updated = true;
+      }
     }
   }
   EXPECT_TRUE(has_updated);
 
   EndEventLoop();
+}
+
+TEST_F(FSEventsTests, test_fsevents_embedded_wildcards) {
+  // Assume event type is not registered.
+  event_pub_ = std::make_shared<FSEventsEventPublisher>();
+  EventFactory::registerEventPublisher(event_pub_);
+
+  auto sub = std::make_shared<TestFSEventsEventSubscriber>();
+  EventFactory::registerEventSubscriber(sub);
+
+  // Create ./fsevents/2/1/
+  fs::create_directories(real_test_dir + "/2/1");
+
+  auto sc = sub->createSubscriptionContext();
+  sc->path = real_test_dir + "/*/1";
+  sub->subscribe(&TestFSEventsEventSubscriber::SimpleCallback, sc);
+
+  // Now the publisher must be configured.
+  event_pub_->configure();
+
+  // The existing wild-card matched directory should be included.
+  // This is populated via filesystem wildcard globbing.
+  ASSERT_EQ(event_pub_->numSubscriptionedPaths(), 1U);
+  std::set<std::string> expected = {real_test_dir + "/2/1/"};
+  EXPECT_EQ(event_pub_->paths_, expected);
 }
 }

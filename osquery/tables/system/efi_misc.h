@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  Copyright (c) 2004, Intel Corporation
  *  All rights reserved.
  *
@@ -8,6 +8,8 @@
  *  of patent rights can be found in the PATENTS file in the same directory.
  *
  */
+
+#pragma once
 
 /**
  * @brief EFI DevicePath GUIDs, structs, and macros.

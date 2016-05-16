@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-#  Copyright (c) 2014, Facebook, Inc.
+#  Copyright (c) 2014-present, Facebook, Inc.
 #  All rights reserved.
 #
 #  This source code is licensed under the BSD-style license found in the
@@ -23,7 +23,7 @@ import test_base
 
 
 class DaemonTests(test_base.ProcessGenerator, unittest.TestCase):
-
+    @test_base.flaky
     def test_1_daemon_without_watchdog(self):
         daemon = self._run_daemon({
             "disable_watchdog": True,
@@ -32,9 +32,9 @@ class DaemonTests(test_base.ProcessGenerator, unittest.TestCase):
         self.assertTrue(daemon.isAlive())
         daemon.kill()
 
+    @test_base.flaky
     def test_2_daemon_with_option(self):
-        logger_path = os.path.join(test_base.CONFIG_DIR, "logger-tests")
-        os.makedirs(logger_path)
+        logger_path = test_base.getTestDirectory(test_base.CONFIG_DIR)
         daemon = self._run_daemon({
             "disable_watchdog": True,
             "disable_extensions": True,
@@ -54,9 +54,13 @@ class DaemonTests(test_base.ProcessGenerator, unittest.TestCase):
         self.assertTrue(os.path.exists(info_path))
         daemon.kill()
 <<<<<<< HEAD
+<<<<<<< HEAD
 
 =======
     
+=======
+
+>>>>>>> 9c01d4a6e348a53b30e9aa8ea256e80918d1cea9
     @test_base.flaky
 >>>>>>> 769a723b5ccb97037b678a874480f37beb2281c6
     def test_3_daemon_with_watchdog(self):
@@ -74,6 +78,7 @@ class DaemonTests(test_base.ProcessGenerator, unittest.TestCase):
         # dies when the watcher goes away
         self.assertTrue(daemon.isDead(children[0]))
 
+    @test_base.flaky
     def test_4_daemon_sighup(self):
         # A hangup signal should not do anything to the daemon.
         daemon = self._run_daemon({
@@ -85,6 +90,7 @@ class DaemonTests(test_base.ProcessGenerator, unittest.TestCase):
         os.kill(daemon.proc.pid, signal.SIGHUP)
         self.assertTrue(daemon.isAlive())
 
+    @test_base.flaky
     def test_5_daemon_sigint(self):
         # An interrupt signal will cause the daemon to stop.
         daemon = self._run_daemon({
@@ -95,14 +101,11 @@ class DaemonTests(test_base.ProcessGenerator, unittest.TestCase):
         # Send a SIGINT
         os.kill(daemon.pid, signal.SIGINT)
         self.assertTrue(daemon.isDead(daemon.pid, 10))
+        self.assertEqual(daemon.retcode, 128 + signal.SIGINT)
 
-        acceptable_retcodes = [-1, -2, -1 * signal.SIGINT]
-        self.assertTrue(daemon.retcode in acceptable_retcodes)
-
+    @test_base.flaky
     def test_6_logger_mode(self):
-        logger_path = os.path.join(test_base.CONFIG_DIR, "logger-mode-tests")
-        os.makedirs(logger_path)
-
+        logger_path = test_base.getTestDirectory(test_base.CONFIG_DIR)
         test_mode = 0754        # Strange mode that should never exist
         daemon = self._run_daemon({
             "disable_watchdog": True,
@@ -122,14 +125,16 @@ class DaemonTests(test_base.ProcessGenerator, unittest.TestCase):
         # Wait for the daemon to flush to GLOG.
         test_base.expectTrue(info_exists)
 
-        # Both log files should exist and have the given mode.
+        # Both log files should exist, the results should have the given mode.
         for fname in ['osqueryd.INFO', 'osqueryd.results.log']:
             pth = os.path.join(logger_path, fname)
             self.assertTrue(os.path.exists(pth))
 
-            rpath = os.path.realpath(info_path)
-            mode = os.stat(rpath).st_mode & 0777
-            self.assertEqual(mode, test_mode)
+            # Only apply the mode checks to .log files.
+            if fname.find('.log') > 0:
+                rpath = os.path.realpath(pth)
+                mode = os.stat(rpath).st_mode & 0777
+                self.assertEqual(mode, test_mode)
 
         daemon.kill()
 

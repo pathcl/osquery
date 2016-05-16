@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -10,19 +10,19 @@
 
 #pragma once
 
+#include <osquery/dispatcher.h>
 #include <osquery/extensions.h>
-
-#include "osquery/dispatcher/dispatcher.h"
 
 // osquery is built with various versions of thrift that use different search
 // paths for their includes. Unfortunately, changing include paths is not
 // possible in every build system.
 // clang-format off
-#include CONCAT(OSQUERY_THRIFT_SERVER_LIB,/TThreadPoolServer.h)
+#include CONCAT(OSQUERY_THRIFT_SERVER_LIB,/TThreadedServer.h)
 #include CONCAT(OSQUERY_THRIFT_LIB,/protocol/TBinaryProtocol.h)
 #include CONCAT(OSQUERY_THRIFT_LIB,/transport/TServerSocket.h)
 #include CONCAT(OSQUERY_THRIFT_LIB,/transport/TBufferTransports.h)
 #include CONCAT(OSQUERY_THRIFT_LIB,/transport/TSocket.h)
+#include CONCAT(OSQUERY_THRIFT_LIB,/concurrency/ThreadManager.h)
 
 // Include intermediate Thrift-generated interface definitions.
 #include CONCAT(OSQUERY_THRIFT,Extension.h)
@@ -49,7 +49,7 @@ typedef SHARED_PTR_IMPL<TTransportFactory> TTransportFactoryRef;
 typedef SHARED_PTR_IMPL<TProtocolFactory> TProtocolFactoryRef;
 typedef SHARED_PTR_IMPL<ThreadManager> TThreadManagerRef;
 typedef SHARED_PTR_IMPL<PosixThreadFactory> PosixThreadFactoryRef;
-typedef std::shared_ptr<TThreadPoolServer> TThreadPoolServerRef;
+using TThreadedServerRef = std::shared_ptr<TThreadedServer>;
 
 namespace extensions {
 
@@ -254,9 +254,17 @@ class ExtensionRunnerCore : public InternalRunnable {
   /// The UNIX domain socket used for requests from the ExtensionManager.
   std::string path_;
 
+  /// Transport instance, will be interrupted if the thread is removed.
+  TServerTransportRef transport_{nullptr};
+
   /// Server instance, will be stopped if thread service is removed.
-  TThreadPoolServerRef server_{nullptr};
-  TThreadManagerRef manager_{nullptr};
+  TThreadedServerRef server_{nullptr};
+
+  /// Protect the service start and stop, this mutex protects server creation.
+  std::mutex service_start_;
+
+  /// Record a dispatcher's request to stop the service.
+  bool service_stopping_{false};
 };
 
 /**

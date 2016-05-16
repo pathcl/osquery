@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -96,7 +96,7 @@ void SMBIOSParser::tables(std::function<void(
     }
 
     auto table_length = next_table - table;
-    predicate(index, header, table, table_length);
+    predicate(index++, header, table, table_length);
     table = next_table;
   }
 }
@@ -122,6 +122,20 @@ void genSMBIOSTable(size_t index,
   r["size"] = INTEGER(size);
   r["md5"] = hashFromBuffer(HASH_TYPE_MD5, address, size);
   results.push_back(r);
+}
+
+std::string dmiString(uint8_t* data, uint8_t* address, size_t offset) {
+  auto index = (uint8_t)(*(address + offset));
+  auto bp = (char*)data;
+  while (index > 1) {
+    while (*bp != 0) {
+      bp++;
+    }
+    bp++;
+    index--;
+  }
+
+  return std::string(bp);
 }
 }
 }

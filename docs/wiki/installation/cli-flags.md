@@ -2,7 +2,17 @@ The osquery shell and daemon use optional command line (CLI) flags to control
 initialization, disable/enable features, and select plugins.
 
 Most of these flag-based parameters apply to both tools. Flags that do not
-control startup settings may be included as "options" to the daemon within its [configuration](../deployment/configuration.md).
+control startup settings may be included as "options" to the daemon within its [configuration](../deployment/configuration.md). To see a full list of flags for your osquery version use `--help` or select from the flags table:
+
+```
+osquery> select * from osquery_flags;
+```
+
+To see the flags that have been updated by your configuration, flagfile, or by the shell consider:
+
+```
+osquery> select * from osquery_flags where default_value <> value;
+```
 
 ## CLI-only (initialization) flags
 
@@ -38,6 +48,10 @@ If you want to read from multiple configuration paths create a directory: **/etc
 
 Check the format of an osquery config and exit. Arbitrary config plugins may be used. osquery will return a non-0 exit if the parsing failed.
 
+`--config_dump=false`
+
+Request that the configuration JSON be printed to standard out before it is updated. In this case "updated" means applied to the active config. When osquery starts it performs an initial update from the config plugin. To quickly debug the content retrieved by custom config plugins use this in tandem with `--config_check`.
+
 ### osquery daemon control flags
 
 `--force=false`
@@ -57,6 +71,10 @@ Disable userland watchdog process. **osqueryd** uses a watchdog process to monit
 Performance limit level (0=loose, 1=normal, 2=restrictive, 3=debug). The default watchdog process uses a "level" to configure performance limits.
 The higher the level the more strict the limits become. The "debug" level disables the performance limits completely.
 
+`--utc=false`
+
+Attempt to convert all UNIX calendar times to UTC. In version 1.8.0 this will be `true` by default.
+
 ### Backing storage control flags
 
 `--database_in_memory=false`
@@ -66,6 +84,10 @@ Keep osquery backing-store in memory. This has a number of performance implicati
 `--database_path=/var/osquery/osquery.db`
 
 If using a disk-based backing store, specify a path. osquery will keep state using a "backing store" using RocksDB by default. This state holds event information such that it may be queried later according to a schedule. It holds the results of the most recent query for each query within the schedule. This last-queried result allows query-differential logging.
+
+`--database_dump=false`
+
+Helpful for debugging database problems. This will print a line for each key in the backing store. Note: There could be MBs worth of data in the backing store.
 
 ### Extensions control flags
 
@@ -149,6 +171,16 @@ See the **tls**/[remote](../deployment/remote.md) plugin documentation. An enrol
 `--logger_tls_period=3`
 
 See the **tls**/[remote](../deployment/remote.md) plugin documentation. This is a number of seconds before checking for buffered logs. Results are sent to the TLS endpoint in intervals, not on demand (unless the period=0).
+
+`--logger_tls_compress=false`
+
+Optionally enable GZIP compression for request bodies when sending. This is optional, and disabled by default, as the deployment must explicitly know that the logging endpoint supports GZIP for content encoding.
+
+`--logger_tls_max=1048576`
+
+It is common for TLS/HTTPS servers to enforce a maximum request body size. The default behavior in osquery is to enforce each log line be under 1M bytes. This means each result line from a query's results cannot exceed 1M, this is very unlikely. Each log attempt will try to forward up to 1024 lines. If your service is limited request bodies, configure the client to limit the log line size.
+
+Use this only in emergency situations as size violations are dropped. It is extremely uncommon for this to occur, as the `value_max` for each column would need to be drastically larger, or the offending table would have to implement several hundred columns.
 
 `--distributed_tls_read_endpoint=/foobar`
 
@@ -241,13 +273,19 @@ Timeout to expire [eventing publish subscribe](../development/pubsub-framework.m
 
 Since event rows are only "added" it does not make sense to emit "removed" results. An optimization can occur within the osquery daemon's query schedule. Every time the select query runs on a subscriber the current time is saved. Subsequent selects will use the previously saved time as the lower bound. This optimization is removed if any constraints on the "time" column are included.
 
+`--events_max=1000`
+
+Maximum number of events to buffer in the backing store while waiting for a query to 'drain' or trigger an expiration. If the expiration (`events_expiry`) is set to 1 day, this max value indicates that only 1000 events will be stored before dropping each day. In this case the limiting time is almost always the scheduled query. If a scheduled query that select from events-based tables occurs sooner than the expiration time that interval becomes the limit.
+
 ### Logging/results flags
 
 `--logger_plugin=filesystem`
 
 Logger plugin name. The default logger is **filesystem**. This writes the various log types as JSON to specific file paths.
 
-Built-in options include: **filesystem**, **tls**
+Multiple logger plugins may be used simultaneously, effectively copying logs to each interface. Separate plugin names with a comma when specifying the configuration (`--logger_plugin=filesystem,syslog`).
+
+Built-in options include: **filesystem**, **tls**, **syslog**
 
 `--disable_logging=false`
 
@@ -301,4 +339,12 @@ In seconds, the amount of time that osqueryd will wait between periodically chec
 
 Most of the shell flags are self-explanatory and are adapted from the SQLite shell. Refer to the shell's ".help" command for details and explanations.
 
-We have added the `--json` switch to output rows as a JSON list.
+There are several flags that control the shell's output format: `--json`, `--list`, `--line`, `--csv`. For all of the output types there is `--nullvalue` and `--separator` that can be used appropriately.
+
+`--planner=false`
+
+When prototyping new queries the planner enables verbose decisions made by the SQLites virtual table API module. This module is implemented by osquery code so it is very helpful to learn what predicate constraints are selected and what full table scans are required for JOINs and nested queries.
+
+`--header=true`
+
+Set this value to `false` to disable column name (header) output. If using the shell in an automation or script the header line in `line` or `csv` mode may not be needed.

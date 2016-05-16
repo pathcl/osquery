@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -59,8 +59,7 @@ REGISTER(FileEventSubscriber, "event_subscriber", "file_events");
 void FileEventSubscriber::configure() {
   // Clear all monitors from INotify.
   // There may be a better way to find the set intersection/difference.
-  auto pub = getPublisher();
-  pub->removeSubscriptions();
+  removeSubscriptions();
 
   auto parser = Config::getParser("file_paths");
   auto& accesses = parser->getData().get_child("file_accesses");
@@ -72,8 +71,10 @@ void FileEventSubscriber::configure() {
       // Use the filesystem globbing pattern to determine recursiveness.
       sc->recursive = 0;
       sc->path = file;
-      sc->mask = (accesses.count(category) > 0) ? IN_ALL_EVENTS
-                                                : (IN_ALL_EVENTS ^ IN_ACCESS);
+      sc->mask = kFileDefaultMasks;
+      if (accesses.count(category) > 0) {
+        sc->mask |= kFileAccessMasks;
+      }
       sc->category = category;
       subscribe(&FileEventSubscriber::Callback, sc);
     }
@@ -91,9 +92,17 @@ Status FileEventSubscriber::Callback(const ECRef& ec, const SCRef& sc) {
   r["category"] = sc->category;
   r["transaction_id"] = INTEGER(ec->event->cookie);
 
-  // Add hashing and 'join' against the file table for stat-information.
-  decorateFileEvent(
-      ec->path, (ec->action == "CREATED" || ec->action == "UPDATED"), r);
+  if ((sc->mask & kFileAccessMasks) != kFileAccessMasks) {
+    // Add hashing and 'join' against the file table for stat-information.
+    decorateFileEvent(ec->path,
+                      (ec->action == "CREATED" || ec->action == "UPDATED"), r);
+  } else {
+    // The access event on Linux would generate additional events if stated.
+    for (const auto& column : kCommonFileColumns) {
+      r[column] = "0";
+    }
+    r["hashed"] = "0";
+  }
 
   // A callback is somewhat useless unless it changes the EventSubscriber
   // state or calls `add` to store a marked up event.

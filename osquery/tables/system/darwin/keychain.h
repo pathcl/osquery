@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -7,6 +7,8 @@
  *  of patent rights can be found in the PATENTS file in the same directory.
  *
  */
+
+#pragma once
 
 #include <map>
 #include <set>
@@ -55,8 +57,7 @@ const std::map<unsigned long, std::string> kKeyUsageFlags = {
     {0x0020, "Key Encipherment"},
     {0x0040, "Non Repudiation"},
     {0x0080, "Digital Signature"},
-    {0x8000, "Decipher Only"}
-};
+    {0x8000, "Decipher Only"}};
 // clang-format on
 
 void genKeychains(const std::string& path, CFMutableArrayRef& keychains);
@@ -66,16 +67,21 @@ std::string getKeychainPath(const SecKeychainItemRef& item);
 std::string genKIDProperty(const unsigned char* data, int len);
 
 /// Generate the public key algorithm and signing algorithm.
-void genAlgorithmProperties(const X509* cert,
+void genAlgorithmProperties(X509* cert,
                             std::string& key,
-                            std::string& sig);
+                            std::string& sig,
+                            std::string& size);
 
 /// Generate common name and subject.
-void genCommonName(X509* cert, std::string& subject, std::string& common_name);
+void genCommonName(X509* cert,
+                   std::string& subject,
+                   std::string& common_name,
+                   std::string& issuer);
 time_t genEpoch(ASN1_TIME* time);
 
-std::string genSHA1ForCertificate(const CFDataRef& raw_cert);
+std::string genSHA1ForCertificate(X509* cert);
 bool CertificateIsCA(X509* cert);
+bool CertificateIsSelfSigned(X509* cert);
 
 /// Generate a list of keychain items for a given item type.
 CFArrayRef CreateKeychainItems(const std::set<std::string>& paths,

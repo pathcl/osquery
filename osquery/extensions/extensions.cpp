@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -12,13 +12,15 @@
 
 #include <boost/algorithm/string/trim.hpp>
 
+#include <osquery/core.h>
 #include <osquery/filesystem.h>
 #include <osquery/logger.h>
 #include <osquery/registry.h>
 #include <osquery/sql.h>
 
-#include "osquery/extensions/interface.h"
+#include "osquery/core/conversions.h"
 #include "osquery/core/watcher.h"
+#include "osquery/extensions/interface.h"
 
 using namespace osquery::extensions;
 
@@ -34,6 +36,7 @@ const std::string kModuleExtension = ".dylib";
 #else
 const std::string kModuleExtension = ".so";
 #endif
+const std::string kExtensionExtension = ".ext";
 
 CLI_FLAG(bool, disable_extensions, false, "Disable extension API");
 
@@ -77,29 +80,46 @@ EXTENSION_FLAG_ALIAS(interval, extensions_interval);
 
 void ExtensionWatcher::start() {
   // Watch the manager, if the socket is removed then the extension will die.
-  while (true) {
+  // A check for sane paths and activity is applied before the watcher
+  // service is added and started.
+  while (!interrupted()) {
     watch();
-    interruptableSleep(interval_);
+    pauseMilli(interval_);
   }
 }
 
 void ExtensionWatcher::exitFatal(int return_code) {
   // Exit the extension.
-  ::exit(return_code);
+  // We will save the wanted return code and raise an interrupt.
+  // This interrupt will be handled by the main thread then join the watchers.
+  Initializer::requestShutdown(return_code);
 }
 
 void ExtensionWatcher::watch() {
+  // Attempt to ping the extension core.
+  // This does NOT use pingExtension to avoid the latency checks applied.
   ExtensionStatus status;
-  try {
-    auto client = EXManagerClient(path_);
-    // Ping the extension manager until it goes down.
-    client.get()->ping(status);
-  } catch (const std::exception& e) {
-    LOG(WARNING) << "Extension watcher ending: osquery core has gone away";
+  bool core_sane = true;
+  if (isWritable(path_)) {
+    try {
+      auto client = EXManagerClient(path_);
+      // Ping the extension manager until it goes down.
+      client.get()->ping(status);
+    } catch (const std::exception& e) {
+      core_sane = false;
+    }
+  } else {
+    // The previously-writable extension socket is not usable.
+    core_sane = false;
+  }
+
+  if (!core_sane) {
+    LOG(INFO) << "Extension watcher ending: osquery core has gone away";
     exitFatal(0);
   }
 
   if (status.code != ExtensionCode::EXT_SUCCESS && fatal_) {
+    // The core may be healthy but return a failed ping status.
     exitFatal();
   }
 }
@@ -111,12 +131,19 @@ void ExtensionManagerWatcher::watch() {
 
   ExtensionStatus status;
   for (const auto& uuid : uuids) {
-    try {
-      auto client = EXClient(getExtensionSocket(uuid));
-      // Ping the extension until it goes down.
-      client.get()->ping(status);
-    } catch (const std::exception& e) {
-      failures_[uuid] += 1;
+    auto path = getExtensionSocket(uuid);
+    if (isWritable(path)) {
+      try {
+        auto client = EXClient(path);
+        // Ping the extension until it goes down.
+        client.get()->ping(status);
+      } catch (const std::exception& e) {
+        failures_[uuid] += 1;
+        continue;
+      }
+    } else {
+      // Immediate fail non-writable paths.
+      failures_[uuid] = 3;
       continue;
     }
 
@@ -164,7 +191,8 @@ void loadExtensions() {
     return;
   }
 
-  // Optionally autoload extensions
+  // Optionally autoload extensions, sanitize the binary path and inform
+  // the osquery watcher to execute the extension when started.
   auto status = loadExtensions(FLAGS_extensions_autoload);
   if (!status.ok()) {
     VLOG(1) << "Could not autoload extensions: " << status.what();
@@ -178,12 +206,49 @@ void loadModules() {
   }
 }
 
+static bool isFileSafe(std::string& path, const std::string& type) {
+  boost::trim(path);
+  if (path.size() == 0 || path[0] == '#' || path[0] == ';') {
+    return false;
+  }
+
+  // Resolve acceptable extension binaries from autoload paths.
+  if (isDirectory(path).ok()) {
+    VLOG(1) << "Cannot autoload " << type << " from directory: " << path;
+    return false;
+  }
+  // The extendables will force an appropriate file path extension.
+  auto& ext = (type == "extension") ? kExtensionExtension : kModuleExtension;
+
+  // Only autoload file which were safe at the time of discovery.
+  // If the binary later becomes unsafe (permissions change) then it will fail
+  // to reload if a reload is ever needed.
+  fs::path extendable(path);
+  // Set the output sanitized path.
+  path = extendable.string();
+  if (!safePermissions(extendable.parent_path().string(), path, true)) {
+    LOG(WARNING) << "Will not autoload " << type
+                 << " with unsafe permissions: " << path;
+    return false;
+  }
+
+  if (extendable.extension().string() != ext) {
+    LOG(WARNING) << "Will not autoload " << type << " not ending in '" << ext
+                 << "': " << path;
+    return false;
+  }
+
+  VLOG(1) << "Found autoloadable " << type << ": " << path;
+  return true;
+}
+
 Status loadExtensions(const std::string& loadfile) {
   std::string autoload_paths;
   if (readFile(loadfile, autoload_paths).ok()) {
     for (auto& path : osquery::split(autoload_paths, "\n")) {
-      boost::trim(path);
-      if (path.size() > 0 && path[0] != '#' && path[0] != ';') {
+      if (isFileSafe(path, "extension")) {
+        // After the path is sanitized the watcher becomes responsible for
+        // forking and executing the extension binary.
         Watcher::addExtensionPath(path);
       }
     }
@@ -192,33 +257,21 @@ Status loadExtensions(const std::string& loadfile) {
   return Status(1, "Failed reading: " + loadfile);
 }
 
-Status loadModuleFile(const std::string& path) {
-  fs::path module(path);
-  if (safePermissions(module.parent_path().string(), path)) {
-    if (module.extension().string() == kModuleExtension) {
-      // Silently allow module load failures to drop.
-      RegistryModuleLoader loader(module.string());
-      loader.init();
-      return Status(0, "OK");
-    }
-  }
-  return Status(1, "Module check failed");
-}
-
 Status loadModules(const std::string& loadfile) {
   // Split the search path for modules using a ':' delimiter.
+  bool all_loaded = true;
   std::string autoload_paths;
   if (readFile(loadfile, autoload_paths).ok()) {
-    auto status = Status(0, "OK");
-    for (auto& module_path : osquery::split(autoload_paths, "\n")) {
-      boost::trim(module_path);
-      auto path_status = loadModuleFile(module_path);
-      if (!path_status.ok()) {
-        status = path_status;
+    for (auto& path : osquery::split(autoload_paths, "\n")) {
+      if (isFileSafe(path, "module")) {
+        RegistryModuleLoader loader(path);
+        loader.init();
+      } else {
+        all_loaded = false;
       }
     }
     // Return an aggregate failure if any load fails (invalid search path).
-    return status;
+    return Status((all_loaded) ? 0 : 1);
   }
   return Status(1, "Failed reading: " + loadfile);
 }
@@ -273,18 +326,7 @@ Status startExtension(const std::string& name,
     // If the extension failed to start then the EM is most likely unavailable.
     return status;
   }
-
-  try {
-    // The extension does nothing but serve the thrift API.
-    // Join on both the thrift and extension manager watcher services.
-    Dispatcher::joinServices();
-  } catch (const std::exception& e) {
-    // The extension manager may shutdown without notifying the extension.
-    return Status(0, e.what());
-  }
-
-  // An extension will only return on failure.
-  return Status(0, "Extension was shutdown");
+  return Status(0);
 }
 
 Status startExtension(const std::string& manager_path,
@@ -459,8 +501,7 @@ Status getExtensions(const std::string& manager_path,
 
   // Convert from Thrift-internal list type to RouteUUID/ExtenionInfo type.
   for (const auto& ext : ext_list) {
-    extensions[ext.first] = {ext.second.name,
-                             ext.second.version,
+    extensions[ext.first] = {ext.second.name, ext.second.version,
                              ext.second.min_sdk_version,
                              ext.second.sdk_version};
   }

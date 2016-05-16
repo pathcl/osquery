@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -10,11 +10,12 @@
 
 #pragma once
 
+#include <csignal>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
-#include <boost/thread/shared_mutex.hpp>
 #include <boost/filesystem/path.hpp>
 
 #include <osquery/status.h>
@@ -46,11 +47,13 @@
 
 namespace osquery {
 
-/**
- * @brief The version of osquery
- */
+/// The version of osquery, includes the git revision if not tagged.
 extern const std::string kVersion;
+
+/// The SDK version removes any git revision hash (1.6.1-g0000 becomes 1.6.1).
 extern const std::string kSDKVersion;
+
+/// Identifies the build platform of either the core extension.
 extern const std::string kSDKPlatform;
 
 /// Use a macro for the sdk/platform literal, symbols available in lib.cpp.
@@ -68,11 +71,27 @@ enum ToolType {
   OSQUERY_EXTENSION,
 };
 
-typedef boost::unique_lock<boost::shared_mutex> WriteLock;
-typedef boost::shared_lock<boost::shared_mutex> ReadLock;
+/// Helper alias for defining mutexes throughout the codebase.
+using Mutex = std::mutex;
+
+/// Helper alias for write locking a mutex.
+using WriteLock = std::lock_guard<Mutex>;
+
+/// Helper alias for read locking a mutex (do not support a ReadMutex).
+// using ReadLock = std::shared_lock<std::shared_mutex>;
 
 /// The osquery tool type for runtime decisions.
 extern ToolType kToolType;
+
+/**
+ * @brief The requested exit code.
+ *
+ * Use Initializer::shutdown to request shutdown in most cases.
+ * This will raise a signal to the main thread requesting the dispatcher to
+ * interrupt all services. There is a thread requesting a join of all services
+ * that will continue the shutdown process.
+ */
+extern volatile std::sig_atomic_t kExitCode;
 
 class Initializer : private boost::noncopyable {
  public:
@@ -95,7 +114,7 @@ class Initializer : private boost::noncopyable {
    * A daemon has additional constraints, it can use a process mutex, check
    * for sane/non-default configurations, etc.
    */
-  void initDaemon();
+  void initDaemon() const;
 
   /**
    * @brief Daemon tools may want to continually spawn worker processes
@@ -113,13 +132,36 @@ class Initializer : private boost::noncopyable {
    *
    * @param name The name of the worker process.
    */
-  void initWorkerWatcher(const std::string& name);
+  void initWorkerWatcher(const std::string& name = "") const;
 
   /// Assume initialization finished, start work.
-  void start();
-  /// Turns off various aspects of osquery such as event loops.
-  void shutdown();
+  void start() const;
 
+  /**
+   * @brief Forcefully request the application stop.
+   *
+   * Since all osquery tools may implement various 'dispatched' services in the
+   * form of event handler threads or thrift service and client pools, a stop
+   * request should behave nicely and request these services stop.
+   *
+   * Use shutdown whenever you would normally call ::exit.
+   *
+   * @param retcode the requested return code for the process.
+   */
+  static void requestShutdown(int retcode = EXIT_SUCCESS);
+
+  /// Exit immediately without requesting the dispatcher to stop.
+  static void shutdown(int retcode = EXIT_SUCCESS);
+
+  /**
+   * @brief Cleanly wait for all services and components to shutdown.
+   *
+   * Enter a join of all services followed by a sync wait for event loops.
+   * If the main thread is out of actions it can call ::waitForShutdown.
+   */
+  static void waitForShutdown();
+
+ public:
   /**
    * @brief Check if a process is an osquery worker.
    *
@@ -133,75 +175,27 @@ class Initializer : private boost::noncopyable {
 
  private:
   /// Initialize this process as an osquery daemon worker.
-  void initWorker(const std::string& name);
+  void initWorker(const std::string& name) const;
+
   /// Initialize the osquery watcher, optionally spawn a worker.
-  void initWatcher();
+  void initWatcher() const;
+
   /// Set and wait for an active plugin optionally broadcasted.
-  void initActivePlugin(const std::string& type, const std::string& name);
+  void initActivePlugin(const std::string& type, const std::string& name) const;
 
  private:
+  /// A saved, mutable, reference to the process's argc.
   int* argc_{nullptr};
+
+  /// A saved, mutable, reference to the process's argv.
   char*** argv_{nullptr};
+
+  /// The deduced tool type, determined by initializer construction.
   ToolType tool_;
+
+  /// The deduced program name determined by executing path.
   std::string binary_;
 };
-
-/**
- * @brief Split a given string based on an optional delimiter.
- *
- * If no delimiter is supplied, the string will be split based on whitespace.
- *
- * @param s the string that you'd like to split
- * @param delim the delimiter which you'd like to split the string by
- *
- * @return a vector of strings split by delim.
- */
-std::vector<std::string> split(const std::string& s,
-                               const std::string& delim = "\t ");
-
-/**
- * @brief Split a given string based on an delimiter.
- *
- * @param s the string that you'd like to split.
- * @param delim the delimiter which you'd like to split the string by.
- * @param occurrences the number of times to split by delim.
- *
- * @return a vector of strings split by delim for occurrences.
- */
-std::vector<std::string> split(const std::string& s,
-                               const std::string& delim,
-                               size_t occurences);
-
-/**
- * @brief In-line replace all instances of from with to.
- *
- * @param str The input/output mutable string.
- * @param from Search string
- * @param to Replace string
- */
-inline void replaceAll(std::string& str,
-                       const std::string& from,
-                       const std::string& to) {
-  if (from.empty()) {
-    return;
-  }
-
-  size_t start_pos = 0;
-  while ((start_pos = str.find(from, start_pos)) != std::string::npos) {
-    str.replace(start_pos, from.length(), to);
-    start_pos += to.length();
-  }
-}
-
-/**
- * @brief Join a vector of strings using a tokenizer.
- *
- * @param s the string that you'd like to split.
- * @param tok a token glue.
- *
- * @return a joined string.
- */
-std::string join(const std::vector<std::string>& s, const std::string& tok);
 
 /**
  * @brief Getter for a host's current hostname
@@ -222,7 +216,7 @@ Status getHostUUID(std::string& ident);
  *
  * @return uuid string to identify this machine
  */
-std::string generateHostUuid();
+std::string generateHostUUID();
 
 /**
  * @brief Get a configured UUID/name that uniquely identify this machine
@@ -232,13 +226,6 @@ std::string generateHostUuid();
 std::string getHostIdentifier();
 
 /**
- * @brief Getter for the current time, in a human-readable format.
- *
- * @return the current date/time in the format: "Wed Sep 21 10:27:52 2011"
- */
-std::string getAsciiTime();
-
-/**
  * @brief Getter for the current UNIX time.
  *
  * @return an int representing the amount of seconds since the UNIX epoch
@@ -246,41 +233,11 @@ std::string getAsciiTime();
 size_t getUnixTime();
 
 /**
- * @brief In-line helper function for use with utf8StringSize
- */
-template <typename _Iterator1, typename _Iterator2>
-inline size_t incUtf8StringIterator(_Iterator1& it, const _Iterator2& last) {
-  if (it == last) {
-    return 0;
-  }
-
-  size_t res = 1;
-  for (++it; last != it; ++it, ++res) {
-    unsigned char c = *it;
-    if (!(c & 0x80) || ((c & 0xC0) == 0xC0)) {
-      break;
-    }
-  }
-
-  return res;
-}
-
-/**
- * @brief Get the length of a UTF-8 string
+ * @brief Getter for the current time, in a human-readable format.
  *
- * @param str The UTF-8 string
- *
- * @return the length of the string
+ * @return the current date/time in the format: "Wed Sep 21 10:27:52 2011"
  */
-inline size_t utf8StringSize(const std::string& str) {
-  size_t res = 0;
-  std::string::const_iterator it = str.begin();
-  for (; it != str.end(); incUtf8StringIterator(it, str.end())) {
-    res++;
-  }
-
-  return res;
-}
+std::string getAsciiTime();
 
 /**
  * @brief Create a pid file
@@ -326,6 +283,9 @@ class DropPrivileges : private boost::noncopyable {
 
  private:
   DropPrivileges() : dropped_(false), to_user_(0), to_group_(0) {}
+
+  /// Restore groups if dropping consecutively.
+  void restoreGroups();
 
  private:
   /// Boolean to track if this instance needs to restore privileges.

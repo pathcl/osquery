@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-#  Copyright (c) 2014, Facebook, Inc.
+#  Copyright (c) 2014-present, Facebook, Inc.
 #  All rights reserved.
 #
 #  This source code is licensed under the BSD-style license found in the
@@ -74,7 +74,6 @@ function main_oracle() {
   fi
 
   install_cmake
-  install_boost
 
   if [[ $DISTRO = "oracle5" ]]; then
     package cryptsetup-luks-devel
@@ -82,9 +81,6 @@ function main_oracle() {
   elif [[ $DISTRO = "oracle6" ]]; then
     package libudev-devel
   fi
-
-  install_gflags
-  install_iptables_dev
 
   package doxygen
   package byacc
@@ -105,12 +101,18 @@ function main_oracle() {
     package libtool
   fi
 
+  install_boost
+  install_gflags
+  install_glog
+  install_google_benchmark
+
   install_snappy
   install_rocksdb
   install_thrift
   install_yara
+  install_asio
   install_cppnetlib
-  install_google_benchmark
+  install_sleuthkit
 
   if [[ $DISTRO = "oracle5" ]]; then
     # Install python26 and pip from PyPA.
@@ -126,8 +128,13 @@ function main_oracle() {
     package rubygems
   fi
 
+  # Device mapper uses the exact version as the ABI.
+  # We will build and install a static version.
+  remove_package device-mapper-devel
+  install_device_mapper
+
   package file-libs
-  install_sleuthkit
+  install_iptables_dev
 
   package audit-libs-devel
   package audit-libs-static

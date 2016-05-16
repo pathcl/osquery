@@ -15,22 +15,28 @@
 
 #include <signal.h>
 #include <stdio.h>
-#include <sys/time.h>
 #include <sys/resource.h>
+#include <sys/time.h>
 
-#include <readline/readline.h>
 #include <readline/history.h>
+#include <readline/readline.h>
 
 #include <sqlite3.h>
 
 #include <boost/algorithm/string/predicate.hpp>
 
+#include <osquery/config.h>
 #include <osquery/database.h>
 #include <osquery/filesystem.h>
 #include <osquery/flags.h>
+#include <osquery/packs.h>
 
 #include "osquery/devtools/devtools.h"
 #include "osquery/sql/virtual_table.h"
+
+#if defined(SQLITE_ENABLE_WHERETRACE)
+extern int sqlite3WhereTrace;
+#endif
 
 namespace osquery {
 
@@ -39,12 +45,15 @@ SHELL_FLAG(bool, csv, false, "Set output mode to 'csv'");
 SHELL_FLAG(bool, json, false, "Set output mode to 'json'");
 SHELL_FLAG(bool, line, false, "Set output mode to 'line'");
 SHELL_FLAG(bool, list, false, "Set output mode to 'list'");
-SHELL_FLAG(string, nullvalue, "", "Set string for NULL values, default ''");
 SHELL_FLAG(string, separator, "|", "Set output field separator, default '|'");
+SHELL_FLAG(bool, header, true, "Toggle column headers true/false");
+SHELL_FLAG(string, pack, "", "Run all queries in a pack");
 
 /// Define short-hand shell switches.
 SHELL_FLAG(bool, L, false, "List all table names");
 SHELL_FLAG(string, A, "", "Select all from a table");
+
+DECLARE_string(nullvalue);
 }
 
 static char zHelp[] =
@@ -173,9 +182,7 @@ static char continuePrompt[20]; // Continuation prompt. default: "   ...> "
 // since the shell is built around the callback paradigm it would be a lot
 // of work. Instead just use this hack, which is quite harmless.
 static const char *zShellStatic = 0;
-static void shellstaticFunc(sqlite3_context *context,
-                            int argc,
-                            sqlite3_value **argv) {
+void shellstaticFunc(sqlite3_context *context, int argc, sqlite3_value **argv) {
   assert(0 == argc);
   assert(zShellStatic);
   UNUSED_PARAMETER(argc);
@@ -359,21 +366,19 @@ static void output_c_string(FILE *out, const char *z) {
 ** If a field contains any character identified by a 1 in the following
 ** array, then the string must be quoted for CSV.
 */
-// clang-format off
 static const char needCsvQuote[] = {
-  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-  1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-  0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-  1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
 };
-// clang-format on
 
 /*
 ** Output a single term of CSV.  Actually, p->separator is used for
@@ -417,9 +422,10 @@ static void output_csv(struct callback_data *p, const char *z, int bSep) {
 /*
 ** This routine runs when the user presses Ctrl-C
 */
-static void interrupt_handler(int NotUsed) {
-  UNUSED_PARAMETER(NotUsed);
-  seenInterrupt = 1;
+static void interrupt_handler(int signal) {
+  if (signal == SIGINT) {
+    seenInterrupt = 1;
+  }
 }
 #endif
 
@@ -442,8 +448,10 @@ static int shell_callback(
 
     osquery::Row r;
     for (i = 0; i < nArg; ++i) {
-      if (azCol[i] != nullptr && azArg[i] != nullptr) {
-        r[std::string(azCol[i])] = std::string(azArg[i]);
+      if (azCol[i] != nullptr) {
+        r[std::string(azCol[i])] = (azArg[i] == nullptr)
+                                       ? osquery::FLAGS_nullvalue
+                                       : std::string(azArg[i]);
       }
     }
     osquery::computeRowLengths(r, p->prettyPrint->lengths);
@@ -695,9 +703,10 @@ static int shell_exec(
     struct callback_data *pArg, /* Pointer to struct callback_data */
     char **pzErrMsg /* Error msg written here */
     ) {
+
   // Grab a lock on the managed DB instance.
   auto dbc = osquery::SQLiteDBManager::get();
-  auto db = dbc.db();
+  auto db = dbc->db();
 
   sqlite3_stmt *pStmt = nullptr; /* Statement to execute. */
   int rc = SQLITE_OK; /* Return Code */
@@ -811,6 +820,7 @@ static int shell_exec(
       }
     }
   } /* end while */
+  dbc->clearAffectedTables();
 
   if (pArg && pArg->mode == MODE_Pretty) {
     if (osquery::FLAGS_json) {
@@ -960,8 +970,8 @@ static int booleanValue(char *zArg) {
   if (sqlite3_stricmp(zArg, "off") == 0 || sqlite3_stricmp(zArg, "no") == 0) {
     return 0;
   }
-  fprintf(stderr, "ERROR: Not a boolean value: \"%s\". Assuming \"no\".\n",
-          zArg);
+  fprintf(
+      stderr, "ERROR: Not a boolean value: \"%s\". Assuming \"no\".\n", zArg);
   return 0;
 }
 
@@ -1040,10 +1050,6 @@ static int do_meta_command(char *zLine, struct callback_data *p) {
   int rc = 0;
   char *azArg[50];
 
-  // A meta command may act on the database, grab a lock and instance.
-  auto dbc = osquery::SQLiteDBManager::get();
-  auto db = dbc.db();
-
   /* Parse the input line into tokens.
   */
   while (zLine[i] && nArg < ArraySize(azArg)) {
@@ -1095,8 +1101,15 @@ static int do_meta_command(char *zLine, struct callback_data *p) {
     if (rc != SQLITE_OK) {
       fprintf(stderr, "Error querying table: %s\n", azArg[1]);
     }
-  } else if (c == 'b' && n >= 3 && strncmp(azArg[0], "bail", n) == 0 &&
-             nArg > 1 && nArg < 3) {
+    return rc;
+  }
+
+  // A meta command may act on the database, grab a lock and instance.
+  auto dbc = osquery::SQLiteDBManager::get();
+  auto db = dbc->db();
+
+  if (c == 'b' && n >= 3 && strncmp(azArg[0], "bail", n) == 0 && nArg > 1 &&
+      nArg < 3) {
     bail_on_error = booleanValue(azArg[1]);
   } else if (c == 'e' && strncmp(azArg[0], "echo", n) == 0 && nArg > 1 &&
              nArg < 3) {
@@ -1364,8 +1377,8 @@ static int process_input(struct callback_data *p, FILE *in) {
       if (rc || zErrMsg) {
         char zPrefix[100];
         if (in != 0 || !stdin_is_interactive) {
-          sqlite3_snprintf(sizeof(zPrefix), zPrefix, "Error: near line %d:",
-                           startline);
+          sqlite3_snprintf(
+              sizeof(zPrefix), zPrefix, "Error: near line %d:", startline);
         } else {
           sqlite3_snprintf(sizeof(zPrefix), zPrefix, "Error:");
         }
@@ -1422,14 +1435,13 @@ int launchIntoShell(int argc, char **argv) {
   struct callback_data data;
   main_init(&data);
 
-  {
-    // Hold the manager connection instance again in callbacks.
-    auto dbc = SQLiteDBManager::get();
-    // Add some shell-specific functions to the instance.
-    sqlite3_create_function(dbc.db(), "shellstatic", 0, SQLITE_UTF8, 0,
-                            shellstaticFunc, 0, 0);
-  }
+#if defined(SQLITE_ENABLE_WHERETRACE)
+  sqlite3WhereTrace = 0xffffffff;
+#endif
 
+  // Move the attach function method into the osquery SQL implementation.
+  // This allow simple/straightforward control of concurrent DB access.
+  osquery::attachFunctionInternal("shellstatic", shellstaticFunc);
   stdin_is_interactive = isatty(0);
 
   // SQLite: Make sure we have a valid signal handler early
@@ -1438,6 +1450,7 @@ int launchIntoShell(int argc, char **argv) {
   data.out = stdout;
 
   // Set modes and settings from CLI flags.
+  data.showHeader = FLAGS_header;
   if (FLAGS_list) {
     data.mode = MODE_List;
   } else if (FLAGS_line) {
@@ -1449,10 +1462,22 @@ int launchIntoShell(int argc, char **argv) {
     data.mode = MODE_Pretty;
   }
 
-  sqlite3_snprintf(sizeof(data.separator), data.separator, "%s",
-                   FLAGS_separator.c_str());
-  sqlite3_snprintf(sizeof(data.nullvalue), data.nullvalue, "%s",
-                   FLAGS_nullvalue.c_str());
+  sqlite3_snprintf(
+      sizeof(data.separator), data.separator, "%s", FLAGS_separator.c_str());
+  sqlite3_snprintf(
+      sizeof(data.nullvalue), data.nullvalue, "%s", FLAGS_nullvalue.c_str());
+
+  auto runQuery = [&data](const char *query) {
+    char *error = 0;
+    int rc = shell_exec(query, shell_callback, &data, &error);
+    if (error != 0) {
+      fprintf(stderr, "Error: %s\n", error);
+      return (rc != 0) ? rc : 1;
+    } else if (rc != 0) {
+      fprintf(stderr, "Error: unable to process SQL \"%s\"\n", query);
+    }
+    return rc;
+  };
 
   int rc = 0;
   if (FLAGS_L || FLAGS_A.size() > 0) {
@@ -1462,20 +1487,34 @@ int launchIntoShell(int argc, char **argv) {
     memset(cmd, 0, query.size() + 1);
     std::copy(query.begin(), query.end(), cmd);
     rc = do_meta_command(cmd, &data);
+  } else if (FLAGS_pack.size() > 0) {
+    // Check every pack for a name matching the requested --pack flag.
+    Config::getInstance().packs([&runQuery, &rc](std::shared_ptr<Pack> &pack) {
+      if (pack->getName() != FLAGS_pack) {
+        return;
+      }
+
+      for (const auto &query : pack->getSchedule()) {
+        rc = runQuery(query.second.query.c_str());
+        if (rc != 0) {
+          fprintf(stderr, "Could not execute query %s: %s\n",
+                  query.first.c_str(), query.second.query.c_str());
+          return;
+        }
+      }
+    });
+    if (rc != 0) {
+      return rc;
+    }
   } else if (argc > 1 && argv[1] != nullptr) {
     // Run a command or statement from CLI
     char *query = argv[1];
-    char *error = 0;
     if (query[0] == '.') {
       rc = do_meta_command(query, &data);
       rc = (rc == 2) ? 0 : rc;
     } else {
-      rc = shell_exec(query, shell_callback, &data, &error);
-      if (error != 0) {
-        fprintf(stderr, "Error: %s\n", error);
-        return (rc != 0) ? rc : 1;
-      } else if (rc != 0) {
-        fprintf(stderr, "Error: unable to process SQL \"%s\"\n", query);
+      rc = runQuery(query);
+      if (rc != 0) {
         return rc;
       }
     }

@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -328,7 +328,7 @@ Status AuditEventPublisher::run() {
   }
 
   // Only apply a cool down if the reply request failed.
-  osquery::publisherSleep(kAuditMLatency);
+  pauseMilli(kAuditMLatency);
   return Status(0, "OK");
 }
 

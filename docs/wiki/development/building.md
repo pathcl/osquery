@@ -4,7 +4,9 @@ We include a `make deps` command to make it easier for developers to get started
 
 WARNING: This will install or build various dependencies on the build host that are not required to "use" osquery, only build osquery binaries and packages.
 
- If you're trying to run our automatic tool on a machine that is extremely customized and configured, `make deps` may try to install software that conflicts with software you have installed. If this happens, please create an issue and/or submit a pull request with a fix. We'd like to support as many operating systems as possible.
+If you're trying to run our automatic tool on a machine that is extremely customized and configured, `make deps` may try to install software that conflicts with software you have installed. If this happens, please create an issue and/or submit a pull request with a fix. We'd like to support as many operating systems as possible.
+
+In almost all cases `git`, GNU `make`, and `bash` are required for the build. In some cases the dependencies target will attempt to pull them in.
 
 ## Building on OS X
 
@@ -157,12 +159,14 @@ OSQUERY_PLATFORM=custom_linux;1.0 # Set a wacky platform/distro name
 OSQUERY_BUILD_VERSION=9.9.9 # Set a wacky version string
 BUILD_LINK_SHARED=True # Set CMake library discovery to prefer shared libraries
 SDK_VERSION=9.9.9 # Set a wacky SDK-version string
+OSX_VERSION_MIN=10.11 # Override the native minimum OS X version ABI
+
 SANITIZE_THREAD=True # Add -fsanitize=thread when using "make sanitize"
-OPTIMIZED=True # Disable generic CPU optimizations
+OPTIMIZED=True # Enable specific CPU optimizations (not recommended)
 SKIP_TESTS=True # Skip unit test building (very very not recommended!)
 SKIP_BENCHMARKS=True # Build unit tests but skip building benchmark targets
 SKIP_TABLES=True # Build platform without any table implementations or specs
-OSX_VERSION_MIN=10.11 # Override the native minimum OS X version ABI
+SQLITE_DEBUG=True # Enable SQLite query debugging (very verbose!)
 ```
 
 ## Custom Packages
@@ -183,16 +187,16 @@ The osquery package build hosts run a series of additional unit and integration 
 To mimic and follow the same build/release testing workflow use:
 
 ```
+export RUN_BUILD_DEPS=1
+export RUN_RELEASE_TESTS=1
 ./tools/build.sh
 ```
 
-Pay attention to the environment variable `RUN_RELEASE_TESTS=1`, which enables the deployment sanity tests. If you are building an optimized or distribution package manager target this will most likely fail.
+Pay attention to the environment variable `RUN_RELEASE_TESTS=1`, which enables the deployment sanity tests. If you are building an optimized or distribution package manager target this will most likely fail. The `RUN_BUILD_DEPS` variable tells the build to begin with a `make deps`.
 
 ## Notes and FAQ
 
-
 When trying to make, if you encounter:
-
 ```
 Requested dependencies may have changed, run: make deps
 ```

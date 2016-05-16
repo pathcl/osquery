@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -8,11 +8,9 @@
  *
  */
 
-#include "osquery/remote/transports/tls.h"
-
-#include <boost/asio/ssl/context_base.hpp>
-
 #include <osquery/filesystem.h>
+
+#include "osquery/remote/transports/tls.h"
 
 namespace http = boost::network::http;
 
@@ -34,6 +32,9 @@ SSL_CTX* TLSv1_2_server_method(void) { return nullptr; }
 SSL_METHOD* SSLv3_server_method(void) { return nullptr; }
 SSL_METHOD* SSLv3_client_method(void) { return nullptr; }
 SSL_METHOD* SSLv3_method(void) { return nullptr; }
+SSL_METHOD* SSLv2_server_method(void) { return nullptr; }
+SSL_METHOD* SSLv2_client_method(void) { return nullptr; }
+SSL_METHOD* SSLv2_method(void) { return nullptr; }
 #endif
 }
 
@@ -75,8 +76,12 @@ HIDDEN_FLAG(bool,
             "Allow TLS server certificate trust failures");
 #endif
 
+HIDDEN_FLAG(bool, tls_dump, false, "Print remote requests and responses");
+
 /// Undocumented feature to override TLS endpoints.
 HIDDEN_FLAG(bool, tls_node_api, false, "Use node key as TLS endpoints");
+
+DECLARE_bool(verbose);
 
 TLSTransport::TLSTransport() : verify_peer_(true) {
   if (FLAGS_tls_server_certs.size() > 0) {
@@ -131,15 +136,24 @@ http::client TLSTransport::getClient() {
 
   if (client_certificate_file_.size() > 0) {
     if (!osquery::isReadable(client_certificate_file_).ok()) {
-      LOG(WARNING)
-          << "Cannot read TLS client certificate: " << client_certificate_file_;
+      LOG(WARNING) << "Cannot read TLS client certificate: "
+                   << client_certificate_file_;
     } else if (!osquery::isReadable(client_private_key_file_).ok()) {
-      LOG(WARNING)
-          << "Cannot read TLS client private key: " << client_private_key_file_;
+      LOG(WARNING) << "Cannot read TLS client private key: "
+                   << client_private_key_file_;
     } else {
       options.openssl_certificate_file(client_certificate_file_);
       options.openssl_private_key_file(client_private_key_file_);
     }
+  }
+
+  // 'Optionally', though all TLS plugins should set a hostname, supply an SNI
+  // hostname. This will reveal the requested domain.
+  if (options_.count("hostname")) {
+#if BOOST_NETLIB_VERSION_MINOR >= 12
+    // Boost cpp-netlib will only support SNI in versions >= 0.12
+    options.openssl_sni_hostname(options_.get<std::string>("hostname"));
+#endif
   }
 
   http::client client(options);
@@ -162,11 +176,15 @@ Status TLSTransport::sendRequest() {
   http::client::request r(destination_);
   decorateRequest(r);
 
+  VLOG(1) << "TLS/HTTPS GET request to URI: " << destination_;
   try {
-    VLOG(1) << "TLS/HTTPS GET request to URI: " << destination_;
     response_ = client.get(r);
+    const auto& response_body = body(response_);
+    if (FLAGS_verbose && FLAGS_tls_dump) {
+      fprintf(stdout, "%s\n", std::string(response_body).c_str());
+    }
     response_status_ =
-        serializer_->deserialize(body(response_), response_params_);
+        serializer_->deserialize(response_body, response_params_);
   } catch (const std::exception& e) {
     return Status((tlsFailure(e.what())) ? 2 : 1,
                   std::string("Request error: ") + e.what());
@@ -174,7 +192,7 @@ Status TLSTransport::sendRequest() {
   return response_status_;
 }
 
-Status TLSTransport::sendRequest(const std::string& params) {
+Status TLSTransport::sendRequest(const std::string& params, bool compress) {
   if (destination_.find("https://") == std::string::npos) {
     return Status(1, "Cannot create TLS request for non-HTTPS protocol URI");
   }
@@ -182,6 +200,10 @@ Status TLSTransport::sendRequest(const std::string& params) {
   auto client = getClient();
   http::client::request r(destination_);
   decorateRequest(r);
+  if (compress) {
+    // Later, when posting/putting, the data will be optionally compressed.
+    r << boost::network::header("Content-Encoding", "gzip");
+  }
 
   // Allow request calls to override the default HTTP POST verb.
   HTTPVerb verb = HTTP_POST;
@@ -189,16 +211,25 @@ Status TLSTransport::sendRequest(const std::string& params) {
     verb = (HTTPVerb)options_.get<int>("verb", HTTP_POST);
   }
 
+  VLOG(1) << "TLS/HTTPS " << ((verb == HTTP_POST) ? "POST" : "PUT")
+          << " request to URI: " << destination_;
+  if (FLAGS_verbose && FLAGS_tls_dump) {
+    fprintf(stdout, "%s\n", params.c_str());
+  }
+
   try {
-    VLOG(1) << "TLS/HTTPS " << ((verb == HTTP_POST) ? "POST" : "PUT")
-            << " request to URI: " << destination_;
     if (verb == HTTP_POST) {
-      response_ = client.post(r, params);
+      response_ = client.post(r, (compress) ? compressString(params) : params);
     } else {
-      response_ = client.put(r, params);
+      response_ = client.put(r, (compress) ? compressString(params) : params);
+    }
+
+    const auto& response_body = body(response_);
+    if (FLAGS_verbose && FLAGS_tls_dump) {
+      fprintf(stdout, "%s\n", std::string(response_body).c_str());
     }
     response_status_ =
-        serializer_->deserialize(body(response_), response_params_);
+        serializer_->deserialize(response_body, response_params_);
   } catch (const std::exception& e) {
     return Status((tlsFailure(e.what())) ? 2 : 1,
                   std::string("Request error: ") + e.what());

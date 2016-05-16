@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -78,14 +78,14 @@ QueryData genOsqueryEvents(QueryContext& context) {
 QueryData genOsqueryPacks(QueryContext& context) {
   QueryData results;
 
-  Config::getInstance().packs([&results](Pack& pack) {
+  Config::getInstance().packs([&results](std::shared_ptr<Pack>& pack) {
     Row r;
-    r["name"] = pack.getName();
-    r["version"] = pack.getVersion();
-    r["platform"] = pack.getPlatform();
-    r["shard"] = INTEGER(pack.getShard());
+    r["name"] = pack->getName();
+    r["version"] = pack->getVersion();
+    r["platform"] = pack->getPlatform();
+    r["shard"] = INTEGER(pack->getShard());
 
-    auto stats = pack.getStats();
+    auto stats = pack->getStats();
     r["discovery_cache_hits"] = INTEGER(stats.hits);
     r["discovery_executions"] = INTEGER(stats.misses);
     results.push_back(r);
@@ -156,14 +156,14 @@ QueryData genOsqueryExtensions(QueryContext& context) {
 
   ExtensionList extensions;
   if (getExtensions(extensions).ok()) {
-    for (const auto& extenion : extensions) {
+    for (const auto& extension : extensions) {
       Row r;
-      r["uuid"] = TEXT(extenion.first);
-      r["name"] = extenion.second.name;
-      r["version"] = extenion.second.version;
-      r["sdk_version"] = extenion.second.sdk_version;
-      r["path"] = getExtensionSocket(extenion.first);
-      r["type"] = "extension";
+      r["uuid"] = TEXT(extension.first);
+      r["name"] = extension.second.name;
+      r["version"] = extension.second.version;
+      r["sdk_version"] = extension.second.sdk_version;
+      r["path"] = getExtensionSocket(extension.first);
+      r["type"] = (extension.first == 0) ? "core" : "extension";
       results.push_back(r);
     }
   }

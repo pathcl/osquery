@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -9,8 +9,8 @@
  */
 
 #include <osquery/core.h>
-#include <osquery/logger.h>
 #include <osquery/flags.h>
+#include <osquery/logger.h>
 #include <osquery/sql.h>
 
 #include "osquery/sql/sqlite_util.h"
@@ -28,43 +28,32 @@ FLAG(string,
      "Not Specified",
      "Comma-delimited list of table names to be disabled");
 
+using SQLiteDBInstanceRef = std::shared_ptr<SQLiteDBInstance>;
+
 /**
  * @brief A map of SQLite status codes to their corresponding message string
  *
  * Details of this map are defined at: http://www.sqlite.org/c3ref/c_abort.html
  */
 const std::map<int, std::string> kSQLiteReturnCodes = {
-    {0, "SQLITE_OK"},
-    {1, "SQLITE_ERROR"},
-    {2, "SQLITE_INTERNAL"},
-    {3, "SQLITE_PERM"},
-    {4, "SQLITE_ABORT"},
-    {5, "SQLITE_BUSY"},
-    {6, "SQLITE_LOCKED"},
-    {7, "SQLITE_NOMEM"},
-    {8, "SQLITE_READONLY"},
-    {9, "SQLITE_INTERRUPT"},
-    {10, "SQLITE_IOERR"},
-    {11, "SQLITE_CORRUPT"},
-    {12, "SQLITE_NOTFOUND"},
-    {13, "SQLITE_FULL"},
-    {14, "SQLITE_CANTOPEN"},
-    {15, "SQLITE_PROTOCOL"},
-    {16, "SQLITE_EMPTY"},
-    {17, "SQLITE_SCHEMA"},
-    {18, "SQLITE_TOOBIG"},
-    {19, "SQLITE_CONSTRAINT"},
-    {20, "SQLITE_MISMATCH"},
-    {21, "SQLITE_MISUSE"},
-    {22, "SQLITE_NOLFS"},
-    {23, "SQLITE_AUTH"},
-    {24, "SQLITE_FORMAT"},
-    {25, "SQLITE_RANGE"},
-    {26, "SQLITE_NOTADB"},
-    {27, "SQLITE_NOTICE"},
-    {28, "SQLITE_WARNING"},
-    {100, "SQLITE_ROW"},
+    {0, "SQLITE_OK"},        {1, "SQLITE_ERROR"},       {2, "SQLITE_INTERNAL"},
+    {3, "SQLITE_PERM"},      {4, "SQLITE_ABORT"},       {5, "SQLITE_BUSY"},
+    {6, "SQLITE_LOCKED"},    {7, "SQLITE_NOMEM"},       {8, "SQLITE_READONLY"},
+    {9, "SQLITE_INTERRUPT"}, {10, "SQLITE_IOERR"},      {11, "SQLITE_CORRUPT"},
+    {12, "SQLITE_NOTFOUND"}, {13, "SQLITE_FULL"},       {14, "SQLITE_CANTOPEN"},
+    {15, "SQLITE_PROTOCOL"}, {16, "SQLITE_EMPTY"},      {17, "SQLITE_SCHEMA"},
+    {18, "SQLITE_TOOBIG"},   {19, "SQLITE_CONSTRAINT"}, {20, "SQLITE_MISMATCH"},
+    {21, "SQLITE_MISUSE"},   {22, "SQLITE_NOLFS"},      {23, "SQLITE_AUTH"},
+    {24, "SQLITE_FORMAT"},   {25, "SQLITE_RANGE"},      {26, "SQLITE_NOTADB"},
+    {27, "SQLITE_NOTICE"},   {28, "SQLITE_WARNING"},    {100, "SQLITE_ROW"},
     {101, "SQLITE_DONE"},
+};
+
+const std::map<std::string, std::string> kMemoryDBSettings = {
+    {"synchronous", "OFF"},      {"count_changes", "OFF"},
+    {"default_temp_store", "0"}, {"auto_vacuum", "FULL"},
+    {"journal_mode", "OFF"},     {"cache_size", "0"},
+    {"page_count", "0"},
 };
 
 #define OpComparator(x) \
@@ -126,14 +115,26 @@ std::string getStringForSQLiteReturnCode(int code) {
   }
 }
 
-Status SQLiteSQLPlugin::attach(const std::string& name) {
-  // This may be the managed DB, or a transient.
+Status SQLiteSQLPlugin::query(const std::string& q, QueryData& results) const {
   auto dbc = SQLiteDBManager::get();
-  if (!dbc.isPrimary()) {
-    // Do not "reattach" to transient instance.
-    return Status(0, "OK");
-  }
+  auto result = queryInternal(q, results, dbc->db());
+  dbc->clearAffectedTables();
+  return result;
+}
 
+Status SQLiteSQLPlugin::getQueryColumns(const std::string& q,
+                                        TableColumns& columns) const {
+  auto dbc = SQLiteDBManager::get();
+  return getQueryColumnsInternal(q, columns, dbc->db());
+}
+
+SQLInternal::SQLInternal(const std::string& q) {
+  auto dbc = SQLiteDBManager::get();
+  status_ = queryInternal(q, results_, dbc->db());
+  dbc->clearAffectedTables();
+}
+
+Status SQLiteSQLPlugin::attach(const std::string& name) {
   PluginResponse response;
   auto status =
       Registry::call("table", name, {{"action", "columns"}}, response);
@@ -142,70 +143,125 @@ Status SQLiteSQLPlugin::attach(const std::string& name) {
   }
 
   auto statement = columnDefinition(response);
-  return attachTableInternal(name, statement, dbc.db());
+  // Attach requests occurring via the plugin/registry APIs must act on the
+  // primary database. To allow this, getConnection can explicitly request the
+  // primary instance and avoid the contention decisions.
+  auto dbc = SQLiteDBManager::getConnection(true);
+  return attachTableInternal(name, statement, dbc);
 }
 
 void SQLiteSQLPlugin::detach(const std::string& name) {
   auto dbc = SQLiteDBManager::get();
-  if (!dbc.isPrimary()) {
+  if (!dbc->isPrimary()) {
     return;
   }
-  detachTableInternal(name, dbc.db());
+  detachTableInternal(name, dbc->db());
 }
 
-SQLiteDBInstance::SQLiteDBInstance() {
+SQLiteDBInstance::SQLiteDBInstance(sqlite3*& db, std::mutex& mtx)
+    : db_(db), lock_(mtx, std::try_to_lock) {
+  if (lock_.owns_lock()) {
+    primary_ = true;
+  } else {
+    db_ = nullptr;
+    VLOG(1) << "DBManager contention: opening transient SQLite database";
+    init();
+  }
+}
+
+static inline void openOptimized(sqlite3*& db) {
+  sqlite3_open(":memory:", &db);
+
+  std::string settings;
+  for (const auto& setting : kMemoryDBSettings) {
+    settings += "PRAGMA " + setting.first + "=" + setting.second + "; ";
+  }
+  sqlite3_exec(db, settings.c_str(), nullptr, nullptr, nullptr);
+}
+
+void SQLiteDBInstance::init() {
   primary_ = false;
-  sqlite3_open(":memory:", &db_);
-  attachVirtualTables(db_);
+  openOptimized(db_);
 }
 
-SQLiteDBInstance::SQLiteDBInstance(sqlite3*& db) {
-  primary_ = true;
-  db_ = db;
+void SQLiteDBInstance::addAffectedTable(VirtualTableContent* table) {
+  // An xFilter/scan was requested for this virtual table.
+  affected_tables_.insert(std::make_pair(table->name, table));
+}
+
+void SQLiteDBInstance::clearAffectedTables() {
+  if (isPrimary() && !managed_) {
+    // A primary instance must forward clear requests to the DB manager's
+    // 'connection' instance. This is a temporary primary instance.
+    SQLiteDBManager::getConnection(true)->clearAffectedTables();
+    return;
+  }
+
+  for (const auto& table : affected_tables_) {
+    table.second->constraints.clear();
+    table.second->cache.clear();
+  }
+  // Since the affected tables are cleared, there are no more affected tables.
+  // There is no concept of compounding tables between queries.
+  affected_tables_.clear();
 }
 
 SQLiteDBInstance::~SQLiteDBInstance() {
-  if (!primary_) {
+  if (!isPrimary()) {
     sqlite3_close(db_);
   } else {
-    SQLiteDBManager::unlock();
     db_ = nullptr;
   }
 }
 
-void SQLiteDBManager::unlock() { instance().lock_.unlock(); }
+SQLiteDBManager::SQLiteDBManager() : db_(nullptr) {
+  sqlite3_soft_heap_limit64(1);
+  setDisabledTables(Flag::getValue("disable_tables"));
+}
 
 bool SQLiteDBManager::isDisabled(const std::string& table_name) {
   const auto& element = instance().disabled_tables_.find(table_name);
   return (element != instance().disabled_tables_.end());
 }
 
-std::unordered_set<std::string> SQLiteDBManager::parseDisableTablesFlag(
-    const std::string& list) {
+void SQLiteDBManager::setDisabledTables(const std::string& list) {
   const auto& tables = split(list, ",");
-  return std::unordered_set<std::string>(tables.begin(), tables.end());
+  disabled_tables_ =
+      std::unordered_set<std::string>(tables.begin(), tables.end());
 }
 
-SQLiteDBInstance SQLiteDBManager::getUnique() { return SQLiteDBInstance(); }
+SQLiteDBInstanceRef SQLiteDBManager::getUnique() {
+  auto instance = std::make_shared<SQLiteDBInstance>();
+  attachVirtualTables(instance);
+  return instance;
+}
 
-SQLiteDBInstance SQLiteDBManager::get() {
+SQLiteDBInstanceRef SQLiteDBManager::getConnection(bool primary) {
   auto& self = instance();
+  std::unique_lock<std::mutex> lock(self.create_mutex_);
 
-  if (!self.lock_.owns_lock() && self.lock_.try_lock()) {
-    if (self.db_ == nullptr) {
-      // Create primary SQLite DB instance.
-      sqlite3_open(":memory:", &self.db_);
-      attachVirtualTables(self.db_);
-    }
-    return SQLiteDBInstance(self.db_);
-  } else {
-    // If this thread or another has the lock, return a transient db.
-    VLOG(1) << "DBManager contention: opening transient SQLite database";
-    return SQLiteDBInstance();
+  if (self.db_ == nullptr) {
+    // Create primary SQLite DB instance.
+    openOptimized(self.db_);
+    self.connection_ = SQLiteDBInstanceRef(new SQLiteDBInstance(self.db_));
+    attachVirtualTables(self.connection_);
   }
+
+  // Internal usage may request the primary connection explicitly.
+  if (primary) {
+    return self.connection_;
+  }
+
+  // Create a 'database connection' for the managed database instance.
+  auto instance = std::make_shared<SQLiteDBInstance>(self.db_, self.mutex_);
+  if (!instance->isPrimary()) {
+    attachVirtualTables(instance);
+  }
+  return instance;
 }
 
 SQLiteDBManager::~SQLiteDBManager() {
+  connection_ = nullptr;
   if (db_ != nullptr) {
     sqlite3_close(db_);
     db_ = nullptr;
@@ -285,7 +341,6 @@ Status queryInternal(const std::string& q, QueryData& results, sqlite3* db) {
     sqlite3_free(err);
     return Status(1, "Error running query: " + error_string);
   }
-
   return Status(0, "OK");
 }
 
@@ -293,7 +348,7 @@ Status getQueryColumnsInternal(const std::string& q,
                                TableColumns& columns,
                                sqlite3* db) {
   // Turn the query into a prepared statement
-  sqlite3_stmt *stmt{nullptr};
+  sqlite3_stmt* stmt{nullptr};
   auto rc = sqlite3_prepare_v2(db, q.c_str(), q.length() + 1, &stmt, nullptr);
   if (rc != SQLITE_OK || stmt == nullptr) {
     if (stmt != nullptr) {

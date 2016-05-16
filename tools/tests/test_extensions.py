@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-#  Copyright (c) 2014, Facebook, Inc.
+#  Copyright (c) 2014-present, Facebook, Inc.
 #  All rights reserved.
 #
 #  This source code is licensed under the BSD-style license found in the
@@ -346,6 +346,35 @@ class ExtensionTests(test_base.ProcessGenerator, unittest.TestCase):
         extension.kill()
         daemon.kill()
 
+    @test_base.flaky
+    def test_10_extensions_settings(self):
+        loader = test_base.Autoloader(
+            [test_base.ARGS.build + "/osquery/example_extension.ext"])
+        daemon = self._run_daemon({
+            "disable_watchdog": True,
+            "extensions_timeout": EXTENSION_TIMEOUT,
+            "extensions_autoload": loader.path,
+        })
+        self.assertTrue(daemon.isAlive())
+
+        # Get a python-based thrift client for the manager (core).
+        client = test_base.EXClient(daemon.options["extensions_socket"])
+        self.assertTrue(client.open(timeout=EXTENSION_TIMEOUT))
+        em = client.getEM()
+
+        # The waiting extension should have connected to the daemon.
+        # This expect statement will block with a short timeout.
+        result = test_base.expect(em.extensions, 1)
+        self.assertEqual(len(result), 1)
+
+        # The 'complex_example' table reports several columns.
+        # Each is a 'test_type', check each expected value.
+        result = em.query("select * from complex_example")
+        self.assertEqual(result.response[0]['flag_test'], 'false')
+        self.assertEqual(result.response[0]['database_test'], '1')
+
+        client.close()
+        daemon.kill(True)
 
 if __name__ == "__main__":
     test_base.assertPermissions()

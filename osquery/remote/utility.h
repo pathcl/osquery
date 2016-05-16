@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -87,6 +87,7 @@ class TLSRequestHelper : private boost::noncopyable {
 
     // Again check for GET to call with/without parameters.
     auto request = Request<TLSTransport, TSerializer>(uri + uri_suffix);
+    request.setOption("hostname", FLAGS_tls_hostname);
     auto status = (FLAGS_tls_node_api) ? request.call() : request.call(params);
 
     if (!status.ok()) {
@@ -100,13 +101,16 @@ class TLSRequestHelper : private boost::noncopyable {
     }
 
     // Receive config or key rejection
-    if (output.count("node_invalid") > 0) {
-      if (!FLAGS_disable_reenrollment) {
-        clearNodeKey();
-      }
-      return Status(1, "Request failed: Invalid node key");
-    } else if (output.count("error") > 0) {
+    if (output.count("error") > 0) {
       return Status(1, "Request failed: " + output.get("error", "<unknown>"));
+    } else if (output.count("node_invalid") > 0) {
+      auto invalid = output.get("node_invalid", "");
+      if (invalid == "1" || invalid == "true" || invalid == "True") {
+        if (!FLAGS_disable_reenrollment) {
+          clearNodeKey();
+        }
+        return Status(1, "Request failed: Invalid node key");
+      }
     }
     return Status(0, "OK");
   }

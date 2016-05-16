@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -14,6 +14,7 @@
 #include <glob.h>
 #include <pwd.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 
 #include <boost/algorithm/string.hpp>
 #include <boost/filesystem/fstream.hpp>
@@ -38,7 +39,7 @@ FLAG(uint64, read_user_max, 10 * 1024 * 1024, "Maximum non-su read size");
 HIDDEN_FLAG(bool, allow_unsafe, false, "Allow unsafe executable permissions");
 
 /// Disable forensics (atime/mtime preserving) file reads.
-HIDDEN_FLAG(bool, disable_forensic, false, "Disable atime/mtime preservation");
+HIDDEN_FLAG(bool, disable_forensic, true, "Disable atime/mtime preservation");
 
 static const size_t kMaxRecursiveGlobs = 64;
 
@@ -72,7 +73,7 @@ Status writeTextFile(const fs::path& path,
 
 struct OpenReadableFile {
  public:
-  OpenReadableFile(const fs::path& path) {
+  explicit OpenReadableFile(const fs::path& path) {
     dropper_ = DropPrivileges::get();
     if (dropper_->dropToParent(path)) {
       // Open the file descriptor and allow caller to perform error checking.
@@ -181,7 +182,7 @@ Status readFile(const fs::path& path,
                     if (buffer.size() == size) {
                       content += std::move(buffer);
                     } else {
-                      content += std::move(std::string(buffer, size));
+                      content += buffer.substr(0, size);
                     }
                   }));
 }
@@ -241,7 +242,7 @@ static void genGlobs(std::string path,
                      std::vector<std::string>& results,
                      GlobLimits limits) {
   // Use our helped escape/replace for wildcards.
-  replaceGlobWildcards(path);
+  replaceGlobWildcards(path, limits);
 
   // Generate a glob set and recurse for double star.
   size_t glob_index = 0;
@@ -283,7 +284,7 @@ Status resolveFilePattern(const fs::path& fs_path,
   return Status(0, "OK");
 }
 
-inline void replaceGlobWildcards(std::string& pattern) {
+inline void replaceGlobWildcards(std::string& pattern, GlobLimits limits) {
   // Replace SQL-wildcard '%' with globbing wildcard '*'.
   if (pattern.find("%") != std::string::npos) {
     boost::replace_all(pattern, "%", "*");
@@ -297,7 +298,9 @@ inline void replaceGlobWildcards(std::string& pattern) {
   auto base = pattern.substr(0, pattern.find('*'));
   if (base.size() > 0) {
     boost::system::error_code ec;
-    auto canonicalized = fs::canonical(base, ec).string();
+    auto canonicalized = ((limits & GLOB_NO_CANON) == 0)
+                             ? fs::canonical(base, ec).string()
+                             : base;
     if (canonicalized.size() > 0 && canonicalized != base) {
       if (isDirectory(canonicalized)) {
         // Canonicalized directory paths will not include a trailing '/'.

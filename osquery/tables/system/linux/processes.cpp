@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -8,8 +8,8 @@
  *
  */
 
-#include <string>
 #include <map>
+#include <string>
 
 #include <stdlib.h>
 #include <unistd.h>
@@ -17,14 +17,17 @@
 #include <boost/algorithm/string/trim.hpp>
 
 #include <osquery/core.h>
-#include <osquery/tables.h>
 #include <osquery/filesystem.h>
 #include <osquery/logger.h>
+#include <osquery/tables.h>
+
+#include "osquery/core/conversions.h"
 
 namespace osquery {
 namespace tables {
 
-inline std::string getProcAttr(const std::string& attr, const std::string& pid) {
+inline std::string getProcAttr(const std::string& attr,
+                               const std::string& pid) {
   return "/proc/" + pid + "/" + attr;
 }
 
@@ -43,7 +46,8 @@ inline std::string readProcCMDLine(const std::string& pid) {
   return content;
 }
 
-inline std::string readProcLink(const std::string& attr, const std::string& pid) {
+inline std::string readProcLink(const std::string& attr,
+                                const std::string& pid) {
   // The exe is a symlink to the binary on-disk.
   auto attr_path = getProcAttr(attr, pid);
 
@@ -139,7 +143,7 @@ void genProcessMap(const std::string& pid, QueryData& results) {
 
     // BSS with name in pathname.
     r["pseudo"] = (fields[4] == "0" && !r["path"].empty()) ? "1" : "0";
-    results.push_back(r);
+    results.push_back(std::move(r));
   }
 }
 
@@ -154,7 +158,7 @@ struct SimpleProcStat {
   std::string saved_gid; // Gid: - - * -
 
   std::string resident_size; // VmRSS:
-  std::string phys_footprint;  // VmSize:
+  std::string phys_footprint; // VmSize:
 
   // Output from sring parsing /proc/<pid>/stat.
   std::string state;
@@ -245,7 +249,7 @@ void genProcess(const std::string& pid, QueryData& results) {
   r["parent"] = proc_stat.parent;
   r["path"] = readProcLink("exe", pid);
   r["name"] = proc_stat.name;
-  r["group"] = proc_stat.group;
+  r["pgroup"] = proc_stat.group;
   r["state"] = proc_stat.state;
   r["nice"] = proc_stat.nice;
   // Read/parse cmdline arguments.
@@ -254,8 +258,10 @@ void genProcess(const std::string& pid, QueryData& results) {
   r["root"] = readProcLink("root", pid);
   r["uid"] = proc_stat.real_uid;
   r["euid"] = proc_stat.effective_uid;
+  r["suid"] = proc_stat.saved_uid;
   r["gid"] = proc_stat.real_gid;
   r["egid"] = proc_stat.effective_gid;
+  r["sgid"] = proc_stat.saved_gid;
 
   // If the path of the executable that started the process is available and
   // the path exists on disk, set on_disk to 1. If the path is not

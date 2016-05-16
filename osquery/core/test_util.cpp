@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -12,22 +12,26 @@
 #include <deque>
 #include <random>
 #include <sstream>
+#include <thread>
 
 #include <signal.h>
 #include <time.h>
 
-#include <boost/property_tree/json_parser.hpp>
 #include <boost/filesystem/operations.hpp>
+#include <boost/property_tree/json_parser.hpp>
 
+#include <osquery/core.h>
+#include <osquery/database.h>
 #include <osquery/filesystem.h>
 #include <osquery/logger.h>
+#include <osquery/sql.h>
 
 #include "osquery/core/test_util.h"
-#include "osquery/database/db_handle.h"
 
 namespace fs = boost::filesystem;
 
 namespace osquery {
+
 std::string kFakeDirectory = "";
 
 #ifdef DARWIN
@@ -47,6 +51,7 @@ DECLARE_string(database_path);
 DECLARE_string(extensions_socket);
 DECLARE_string(modules_autoload);
 DECLARE_string(extensions_autoload);
+DECLARE_string(enroll_tls_endpoint);
 DECLARE_bool(disable_logging);
 
 typedef std::chrono::high_resolution_clock chrono_clock;
@@ -79,9 +84,13 @@ void initTesting() {
   FLAGS_modules_autoload = kTestWorkingDirectory + "unittests-mod.load";
   FLAGS_disable_logging = true;
 
-  // Create a default DBHandle instance before unittests.
-  (void)DBHandle::getInstance();
+  // Tests need a database plugin.
+  // Set up the database instance for the unittests.
+  DatabasePlugin::setAllowOpen(true);
+  Registry::setActive("database", "ephemeral");
 }
+
+void shutdownTesting() { DatabasePlugin::shutdown(); }
 
 std::map<std::string, std::string> getTestConfigMap() {
   std::string content;
@@ -107,6 +116,13 @@ pt::ptree getUnrestrictedPack() {
   auto tree = getExamplePacksConfig();
   auto packs = tree.get_child("packs");
   return packs.get_child("unrestricted_pack");
+}
+
+// several restrictions (version, platform, shard)
+pt::ptree getRestrictedPack() {
+  auto tree = getExamplePacksConfig();
+  auto packs = tree.get_child("packs");
+  return packs.get_child("restricted_pack");
 }
 
 /// 1 discovery query, darwin platform restriction
@@ -385,6 +401,9 @@ void TLSServerRunner::start() {
     return;
   }
 
+  // Pick a port in an ephemeral range at random.
+  self.port_ = std::to_string(rand() % 10000 + 20000);
+
   // Fork then exec a shell.
   self.server_ = fork();
   if (self.server_ == 0) {
@@ -393,11 +412,48 @@ void TLSServerRunner::start() {
     execlp("sh", "sh", "-c", script.c_str(), nullptr);
     ::exit(0);
   }
-  ::sleep(1);
+
+  size_t delay = 0;
+  std::string query =
+      "select pid from listening_ports where port = '" + self.port_ + "'";
+  while (delay < 2 * 1000) {
+    auto results = SQL(query);
+    if (results.rows().size() > 0) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    delay += 100;
+  }
+}
+
+void TLSServerRunner::setClientConfig() {
+  auto& self = instance();
+
+  self.tls_hostname_ = Flag::getValue("tls_hostname");
+  Flag::updateValue("tls_hostname", "localhost:" + port());
+
+  self.enroll_tls_endpoint_ = Flag::getValue("enroll_tls_endpoint");
+  Flag::updateValue("enroll_tls_endpoint", "/enroll");
+
+  self.tls_server_certs_ = Flag::getValue("tls_server_certs");
+  Flag::updateValue("tls_server_certs", kTestDataPath + "/test_server_ca.pem");
+
+  self.enroll_secret_path_ = Flag::getValue("enroll_secret_path");
+  Flag::updateValue("enroll_secret_path",
+                    kTestDataPath + "/test_enroll_secret.txt");
+}
+
+void TLSServerRunner::unsetClientConfig() {
+  auto& self = instance();
+  Flag::updateValue("tls_hostname", self.tls_hostname_);
+  Flag::updateValue("enroll_tls_endpoint", self.enroll_tls_endpoint_);
+  Flag::updateValue("tls_server_certs", self.tls_server_certs_);
+  Flag::updateValue("enroll_secret_path", self.enroll_secret_path_);
 }
 
 void TLSServerRunner::stop() {
   auto& self = instance();
-  kill(self.server_, SIGTERM);
+  kill(self.server_, SIGKILL);
+  self.server_ = 0;
 }
 }

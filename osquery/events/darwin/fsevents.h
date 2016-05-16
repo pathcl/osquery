@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -98,12 +98,6 @@ class FSEventsEventPublisher
   /// Entrypoint to the run loop
   Status run() override;
 
-  /// Callin for stopping the streams/run loop.
-  void end() override { stop(); }
-
-  /// Delete all paths from prior configuration.
-  void removeSubscriptions() override;
-
  public:
   /// FSEvents registers a client callback instead of using a select/poll loop.
   static void Callback(ConstFSEventStreamRef fsevent_stream,
@@ -114,37 +108,62 @@ class FSEventsEventPublisher
                        const FSEventStreamEventId fsevent_ids[]);
 
  public:
-  bool shouldFire(const FSEventsSubscriptionContextRef& mc,
+  bool shouldFire(const FSEventsSubscriptionContextRef& sc,
                   const FSEventsEventContextRef& ec) const override;
 
  private:
-  // Restart the run loop.
+  /// Restart the run loop.
   void restart();
 
-  // Stop the stream and the run loop.
-  void stop();
+  /// Stop the stream and the run loop.
+  void stop() override;
 
-  // Cause the FSEvents to flush kernel-buffered events.
+  /// Cause the FSEvents to flush kernel-buffered events.
   void flush(bool async = false);
 
- private:
-  // Check if the stream (and run loop) are running.
-  bool isStreamRunning();
+  /**
+   * @brief Each subscription is 'parsed' during configuration.
+   *
+   * For each subscription, FSEvents will 'parse' the requested path and
+   * options. Requests for recursion or path globbing will be resolved.
+   * The input subscription will be modified such that 'fire'-matching can
+   * backtrace event paths to requested subscriptions.
+   *
+   * @params subscription The mutable subscription.
+   * @return A set of output paths to monitor.
+   */
+  std::set<std::string> transformSubscription(
+      FSEventsSubscriptionContextRef& sc) const;
 
-  // Count the number of subscriptioned paths.
-  size_t numSubscriptionedPaths();
+ private:
+  /// Check if the stream (and run loop) are running.
+  bool isStreamRunning() const;
+
+  /// Count the number of subscriptioned paths.
+  size_t numSubscriptionedPaths() const;
 
  private:
   /// Local reference to the start, stop, restart event stream.
   FSEventStreamRef stream_{nullptr};
 
   /// Has the FSEvents run loop and stream been started.
-  bool stream_started_{false};
+  std::atomic<bool> stream_started_{false};
 
   /// Set of paths to monitor, determined by a configure step.
   std::set<std::string> paths_;
 
+  /// Reference to the run loop for this thread.
   CFRunLoopRef run_loop_{nullptr};
+
+ private:
+  /// For testing only, ask the event stream to publish events immediately.
+  bool no_defer_{false};
+
+  /// For testing only, allow the event stream to publish its own events.
+  bool no_self_{true};
+
+  /// Access to watched path set.
+  mutable Mutex mutex_;
 
  private:
   friend class FSEventsTests;
@@ -154,5 +173,6 @@ class FSEventsEventPublisher
   FRIEND_TEST(FSEventsTests, test_fsevents_run);
   FRIEND_TEST(FSEventsTests, test_fsevents_fire_event);
   FRIEND_TEST(FSEventsTests, test_fsevents_event_action);
+  FRIEND_TEST(FSEventsTests, test_fsevents_embedded_wildcards);
 };
 }

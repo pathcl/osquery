@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-#  Copyright (c) 2015, Facebook, Inc.
+#  Copyright (c) 2014-present, Facebook, Inc.
 #  All rights reserved.
 #
 #  This source code is licensed under the BSD-style license found in the
@@ -8,7 +8,7 @@
 #  of patent rights can be found in the PATENTS file in the same directory.
 
 function main_fedora() {
-  sudo yum update -y
+  sudo dnf update -y
 
   package texinfo
   package wget
@@ -34,15 +34,14 @@ function main_fedora() {
   package clang
   package clang-devel
 
-  install_cmake
-
   set_cc clang
   set_cxx clang++
 
-  install_boost
-
-  install_gflags
-  install_iptables_dev
+  if [[ $DISTRO -lt "22" ]]; then
+    install_cmake
+  else
+    package cmake
+  fi
 
   package doxygen
   package byacc
@@ -52,18 +51,30 @@ function main_fedora() {
   package automake
   package libtool
 
+  install_boost
+  install_gflags
+  install_glog
+  install_google_benchmark
+
   install_snappy
   install_rocksdb
   install_thrift
   install_yara
+  install_asio
   install_cppnetlib
-  install_google_benchmark
-
-  package device-mapper-devel
-  package libgcrypt-devel
-  package gettext-devel
-  install_libcryptsetup
   install_sleuthkit
 
+  # Device mapper uses the exact version as the ABI.
+  # We will build and install a static version.
+  remove_package device-mapper-devel
+  package libgcrypt-devel
+  package gettext-devel
+
+  install_device_mapper
+  install_iptables_dev
+  install_libcryptsetup
+
   gem_install fpm
+
+  install_aws_sdk
 }

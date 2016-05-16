@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-#  Copyright (c) 2014, Facebook, Inc.
+#  Copyright (c) 2014-present, Facebook, Inc.
 #  All rights reserved.
 #
 #  This source code is licensed under the BSD-style license found in the
@@ -9,7 +9,8 @@
 
 set -e
 
-CFLAGS="-fPIE -fPIC -O2 -DNDEBUG -march=x86-64 -mno-avx"
+CFLAGS="-fPIE -fPIC -Os -DNDEBUG -march=x86-64 -mno-avx"
+CXXFLAGS="$CFLAGS"
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 BUILD_DIR="$SCRIPT_DIR/../build"
 WORKING_DIR="/tmp/osquery-provisioning"
@@ -28,11 +29,6 @@ function main() {
   if ! hash sudo 2>/dev/null; then
    echo "Please install sudo in this machine"
    exit 0
-  fi
-
-  if [[ $1 = "get_platform" ]]; then
-    echo "$OS;$DISTRO"
-    return 0
   fi
 
   mkdir -p "$WORKING_DIR"
@@ -54,6 +50,10 @@ function main() {
     log "detected centos ($DISTRO)"
     source "$SCRIPT_DIR/provision/centos.sh"
     main_centos
+  elif [[ $OS = "scientific" ]]; then
+    log "detected scientific linux ($DISTRO)"
+    source "$SCRIPT_DIR/provision/scientific.sh"
+    main_scientific
   elif [[ $OS = "rhel" ]]; then
     log "detected rhel ($DISTRO)"
     source "$SCRIPT_DIR/provision/rhel.sh"
@@ -88,16 +88,12 @@ function main() {
 
   cd "$SCRIPT_DIR/../"
 
-  sudo pip install --upgrade pip
-  sudo pip install -r requirements.txt
+  # Pip may have just been installed.
+  PIP=`which pip`
+  sudo $PIP install --upgrade pip
+  sudo $PIP install -r requirements.txt
 
-  # Reset any work or artifacts from build tests in TP.
-  (cd third-party && git reset --hard HEAD)
-  git submodule init
-  git submodule update
-
-  # Remove any previously-cached variables
-  rm build/$OS/CMakeCache.txt >/dev/null 2>&1 || true
+  initialize $OS
 }
 
 check $1 $2

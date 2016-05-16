@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-#  Copyright (c) 2014, Facebook, Inc.
+#  Copyright (c) 2014-present, Facebook, Inc.
 #  All rights reserved.
 #
 #  This source code is licensed under the BSD-style license found in the
@@ -44,19 +44,10 @@ function main_amazon() {
   set_cc clang
   set_cxx clang++
 
-  install_boost
-
-  package libudev-devel
-  package cryptsetup-luks-devel
-
-  install_gflags
-  install_iptables_dev
-
   package doxygen
   package byacc
   package flex
   package bison
-  package file-libs
 
   remove_package libunwind-devel
 
@@ -64,13 +55,24 @@ function main_amazon() {
   install_automake
   install_libtool
 
+  install_boost
+  install_gflags
+  install_glog
+  install_google_benchmark
+
   install_snappy
   install_rocksdb
   install_thrift
   install_yara
+  install_asio
   install_cppnetlib
-  install_google_benchmark
   install_sleuthkit
+
+  package file-libs
+  package file-devel
+  package libudev-devel
+  package cryptsetup-luks-devel
+  install_iptables_dev
 
   package audit-libs-devel
   package audit-libs-static

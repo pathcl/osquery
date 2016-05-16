@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -141,7 +141,7 @@ static int update_user_kernel_buffer(int options,
           &osquery.cqueue, read_offset, max_read_offset)) {
     return -EINVAL;
   }
-  if (!(options & OSQUERY_NO_BLOCK)) {
+  if (!(options & OSQUERY_OPTIONS_NO_BLOCK)) {
     ssize_t offset = 0;
     if ((offset = osquery_cqueue_wait_for_data(&osquery.cqueue)) < 0) {
       return -EINVAL;
@@ -443,7 +443,7 @@ error_exit:
 }
 
 kern_return_t OsqueryStop(kmod_info_t *ki, void *d) {
-  dbg_printf("Kernel module stoping!\n");
+  dbg_printf("Kernel module stopping!\n");
 
   // Only stop if there are no connected daemons.
   lck_mtx_lock(osquery.mtx);
