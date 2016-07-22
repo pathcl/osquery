@@ -26,7 +26,8 @@ class sampleTablePlugin : public TablePlugin {
  private:
   TableColumns columns() const override {
     return {
-        {"foo", INTEGER_TYPE}, {"bar", TEXT_TYPE},
+        std::make_tuple("foo", INTEGER_TYPE, DEFAULT),
+        std::make_tuple("bar", TEXT_TYPE, DEFAULT),
     };
   }
 };
@@ -34,6 +35,95 @@ class sampleTablePlugin : public TablePlugin {
 TEST_F(VirtualTableTests, test_tableplugin_columndefinition) {
   auto table = std::make_shared<sampleTablePlugin>();
   EXPECT_EQ("(`foo` INTEGER, `bar` TEXT)", table->columnDefinition());
+}
+
+class optionsTablePlugin : public TablePlugin {
+ private:
+  TableColumns columns() const override {
+    return {
+        std::make_tuple("id", INTEGER_TYPE, INDEX | REQUIRED),
+        std::make_tuple("username", TEXT_TYPE, OPTIMIZED),
+        std::make_tuple("name", TEXT_TYPE, DEFAULT),
+    };
+  }
+
+ private:
+  FRIEND_TEST(VirtualTableTests, test_tableplugin_options);
+};
+
+TEST_F(VirtualTableTests, test_tableplugin_options) {
+  auto table = std::make_shared<optionsTablePlugin>();
+  EXPECT_EQ(INDEX | REQUIRED, std::get<2>(table->columns()[0]));
+
+  PluginResponse response;
+  PluginRequest request = {{"action", "columns"}};
+  EXPECT_TRUE(table->call(request, response).ok());
+  EXPECT_EQ(INTEGER(INDEX | REQUIRED), response[0]["op"]);
+
+  response = table->routeInfo();
+  EXPECT_EQ(INTEGER(INDEX | REQUIRED), response[0]["op"]);
+
+  std::string expected_statement =
+      "(`id` INTEGER PRIMARY KEY, `username` TEXT, `name` TEXT) WITHOUT ROWID";
+  EXPECT_EQ(expected_statement, columnDefinition(response, true));
+}
+
+class aliasesTablePlugin : public TablePlugin {
+ private:
+  TableColumns columns() const override {
+    return {
+        std::make_tuple("username", TEXT_TYPE, DEFAULT),
+        std::make_tuple("name", TEXT_TYPE, DEFAULT),
+    };
+  }
+
+  std::vector<std::string> aliases() const override {
+    return {"aliases1", "aliases2"};
+  }
+
+  ColumnAliasSet columnAliases() const override {
+    return {
+        {"username", {"user_name"}}, {"name", {"name1", "name2"}},
+    };
+  }
+
+ private:
+  FRIEND_TEST(VirtualTableTests, test_tableplugin_aliases);
+};
+
+TEST_F(VirtualTableTests, test_tableplugin_aliases) {
+  auto table = std::make_shared<aliasesTablePlugin>();
+  std::vector<std::string> expected_aliases = {"aliases1", "aliases2"};
+  EXPECT_EQ(expected_aliases, table->aliases());
+
+  PluginResponse response;
+  PluginRequest request = {{"action", "columns"}};
+  EXPECT_TRUE(table->call(request, response).ok());
+
+  PluginResponse expected_response = {
+      {{"id", "column"},
+       {"name", "username"},
+       {"type", "TEXT"},
+       {"op", INTEGER(DEFAULT)}},
+      {{"id", "column"},
+       {"name", "name"},
+       {"type", "TEXT"},
+       {"op", INTEGER(DEFAULT)}},
+      {{"alias", "aliases1"}, {"id", "alias"}},
+      {{"alias", "aliases2"}, {"id", "alias"}},
+      {{"id", "columnAlias"}, {"name", "name1"}, {"target", "name"}},
+      {{"id", "columnAlias"}, {"name", "name2"}, {"target", "name"}},
+      {{"id", "columnAlias"}, {"name", "user_name"}, {"target", "username"}},
+  };
+  EXPECT_EQ(response, expected_response);
+
+  // Compare the expected table definitions.
+  std::string expected_statement =
+      "(`username` TEXT, `name` TEXT, `name1` TEXT HIDDEN, `name2` TEXT HIDDEN,"
+      " `user_name` TEXT HIDDEN)";
+  EXPECT_EQ(expected_statement, columnDefinition(response, true));
+  expected_statement = "(`username` TEXT, `name` TEXT)";
+  EXPECT_EQ(expected_statement, columnDefinition(response, false));
 }
 
 TEST_F(VirtualTableTests, test_sqlite3_attach_vtable) {
@@ -84,7 +174,8 @@ class pTablePlugin : public TablePlugin {
  private:
   TableColumns columns() const override {
     return {
-        {"x", INTEGER_TYPE}, {"y", INTEGER_TYPE},
+        std::make_tuple("x", INTEGER_TYPE, DEFAULT),
+        std::make_tuple("y", INTEGER_TYPE, DEFAULT),
     };
   }
 
@@ -103,7 +194,8 @@ class kTablePlugin : public TablePlugin {
  private:
   TableColumns columns() const override {
     return {
-        {"x", INTEGER_TYPE}, {"z", INTEGER_TYPE},
+        std::make_tuple("x", INTEGER_TYPE, DEFAULT),
+        std::make_tuple("z", INTEGER_TYPE, DEFAULT),
     };
   }
 
@@ -202,7 +294,7 @@ class jsonTablePlugin : public TablePlugin {
  private:
   TableColumns columns() const override {
     return {
-        {"data", TEXT_TYPE},
+        std::make_tuple("data", TEXT_TYPE, DEFAULT),
     };
   }
 
@@ -277,7 +369,7 @@ class cacheTablePlugin : public TablePlugin {
  private:
   TableColumns columns() const override {
     return {
-        {"data", TEXT_TYPE},
+        std::make_tuple("data", TEXT_TYPE, DEFAULT),
     };
   }
 

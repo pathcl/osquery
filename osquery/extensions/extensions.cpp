@@ -17,8 +17,10 @@
 #include <osquery/logger.h>
 #include <osquery/registry.h>
 #include <osquery/sql.h>
+#include <osquery/system.h>
 
 #include "osquery/core/conversions.h"
+#include "osquery/core/process.h"
 #include "osquery/core/watcher.h"
 #include "osquery/extensions/interface.h"
 
@@ -32,22 +34,32 @@ namespace osquery {
 const size_t kExtensionInitializeLatencyUS = 20000;
 
 #ifdef __APPLE__
-const std::string kModuleExtension = ".dylib";
+#define MODULE_EXTENSION ".dylib"
+#elif defined(WIN32)
+#define MODULE_EXTENSION ".dll"
 #else
-const std::string kModuleExtension = ".so";
+#define MODULE_EXTENSION ".so"
 #endif
-const std::string kExtensionExtension = ".ext";
+
+enum ExtenableTypes {
+  EXTENSION = 1,
+  MODULE = 2,
+};
+
+const std::map<ExtenableTypes, std::string> kExtendables = {
+    {EXTENSION, ".ext"}, {MODULE, MODULE_EXTENSION},
+};
 
 CLI_FLAG(bool, disable_extensions, false, "Disable extension API");
 
 CLI_FLAG(string,
          extensions_socket,
-         "/var/osquery/osquery.em",
+         OSQUERY_DB_HOME "/osquery.em",
          "Path to the extensions UNIX domain socket")
 
 CLI_FLAG(string,
          extensions_autoload,
-         "/etc/osquery/extensions.load",
+         OSQUERY_HOME "/extensions.load",
          "Optional path to a list of autoloaded & managed extensions")
 
 CLI_FLAG(string,
@@ -62,7 +74,7 @@ CLI_FLAG(string,
 
 CLI_FLAG(string,
          modules_autoload,
-         "/etc/osquery/modules.load",
+         OSQUERY_HOME "/modules.load",
          "Optional path to a list of autoloaded registry modules")
 
 /**
@@ -85,6 +97,27 @@ void ExtensionWatcher::start() {
   while (!interrupted()) {
     watch();
     pauseMilli(interval_);
+  }
+}
+
+void ExtensionManagerWatcher::start() {
+  // Watch each extension.
+  while (!interrupted()) {
+    watch();
+    pauseMilli(interval_);
+  }
+
+  // When interrupted, request each extension tear down.
+  const auto uuids = Registry::routeUUIDs();
+  for (const auto& uuid : uuids) {
+    try {
+      auto path = getExtensionSocket(uuid);
+      auto client = EXClient(path);
+      client.get()->shutdown();
+    } catch (const std::exception& e) {
+      VLOG(1) << "Extension UUID " << uuid << " shutdown request failed";
+      continue;
+    }
   }
 }
 
@@ -170,7 +203,7 @@ Status socketWritable(const fs::path& path) {
       return Status(1, "Cannot write extension socket: " + path.string());
     }
 
-    if (!remove(path).ok()) {
+    if (!osquery::remove(path).ok()) {
       return Status(1, "Cannot remove extension socket: " + path.string());
     }
   } else {
@@ -206,19 +239,21 @@ void loadModules() {
   }
 }
 
-static bool isFileSafe(std::string& path, const std::string& type) {
+static bool isFileSafe(std::string& path, ExtenableTypes type) {
   boost::trim(path);
+  // A 'type name' may be used in verbose log output.
+  std::string type_name = ((type == EXTENSION) ? "extension" : "module");
   if (path.size() == 0 || path[0] == '#' || path[0] == ';') {
     return false;
   }
 
   // Resolve acceptable extension binaries from autoload paths.
   if (isDirectory(path).ok()) {
-    VLOG(1) << "Cannot autoload " << type << " from directory: " << path;
+    VLOG(1) << "Cannot autoload " << type_name << " from directory: " << path;
     return false;
   }
   // The extendables will force an appropriate file path extension.
-  auto& ext = (type == "extension") ? kExtensionExtension : kModuleExtension;
+  auto& ext = kExtendables.at(type);
 
   // Only autoload file which were safe at the time of discovery.
   // If the binary later becomes unsafe (permissions change) then it will fail
@@ -227,18 +262,18 @@ static bool isFileSafe(std::string& path, const std::string& type) {
   // Set the output sanitized path.
   path = extendable.string();
   if (!safePermissions(extendable.parent_path().string(), path, true)) {
-    LOG(WARNING) << "Will not autoload " << type
-                 << " with unsafe permissions: " << path;
+    LOG(WARNING) << "Will not autoload " << type_name
+                 << " with unsafe directory permissions: " << path;
     return false;
   }
 
   if (extendable.extension().string() != ext) {
-    LOG(WARNING) << "Will not autoload " << type << " not ending in '" << ext
-                 << "': " << path;
+    LOG(WARNING) << "Will not autoload " << type_name << " not ending in '"
+                 << ext << "': " << path;
     return false;
   }
 
-  VLOG(1) << "Found autoloadable " << type << ": " << path;
+  VLOG(1) << "Found autoloadable " << type_name << ": " << path;
   return true;
 }
 
@@ -246,7 +281,7 @@ Status loadExtensions(const std::string& loadfile) {
   std::string autoload_paths;
   if (readFile(loadfile, autoload_paths).ok()) {
     for (auto& path : osquery::split(autoload_paths, "\n")) {
-      if (isFileSafe(path, "extension")) {
+      if (isFileSafe(path, EXTENSION)) {
         // After the path is sanitized the watcher becomes responsible for
         // forking and executing the extension binary.
         Watcher::addExtensionPath(path);
@@ -263,7 +298,7 @@ Status loadModules(const std::string& loadfile) {
   std::string autoload_paths;
   if (readFile(loadfile, autoload_paths).ok()) {
     for (auto& path : osquery::split(autoload_paths, "\n")) {
-      if (isFileSafe(path, "module")) {
+      if (isFileSafe(path, MODULE)) {
         RegistryModuleLoader loader(path);
         loader.init();
       } else {
@@ -299,7 +334,7 @@ Status extensionPathActive(const std::string& path, bool use_timeout = false) {
     }
     // Increase the total wait detail.
     delay += kExtensionInitializeLatencyUS;
-    ::usleep(kExtensionInitializeLatencyUS);
+    sleepFor(kExtensionInitializeLatencyUS / 1000);
   } while (delay < timeout);
   return Status(1, "Extension socket not available: " + path);
 }
@@ -439,7 +474,8 @@ Status getQueryColumnsExternal(const std::string& manager_path,
   // Translate response map: {string: string} to a vector: pair(name, type).
   for (const auto& column : response.response) {
     for (const auto& col : column) {
-      columns.push_back(make_pair(col.first, columnTypeName(col.second)));
+      columns.push_back(
+          std::make_tuple(col.first, columnTypeName(col.second), DEFAULT));
     }
   }
 

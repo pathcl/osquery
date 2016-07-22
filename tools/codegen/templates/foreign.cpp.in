@@ -23,16 +23,45 @@ auto {{table_name_cc}}Register = []() {
 /// BEGIN[GENTABLE]
   class {{table_name_cc}}TablePlugin : public TablePlugin {
    private:
-    TableColumns columns() const {
+    TableColumns columns() const override {
       return {
 {% for column in schema %}\
-        {"{{column.name}}", {{column.type.affinity}}}\
-{% if not loop.last %}, {% endif %}
+        std::make_tuple("{{column.name}}", {{column.type.affinity}},\
+{% if column.options|length > 0 %} {{column.options_set}}\
+{% else %} DEFAULT\
+{% endif %}\
+),
 {% endfor %}\
       };
     }
+{% if aliases|length > 0 %}\
 
-    QueryData generate(QueryContext& request) { return QueryData(); }
+    std::vector<std::string> aliases() const override {
+      return {
+{% for alias in aliases %}\
+        "{{alias}}",
+{% endfor %}\
+      };
+    }
+{% endif %}\
+
+{% if has_column_aliases %}\
+
+  ColumnAliasSet columnAliases() const override {
+    return {
+{% for column in schema %}\
+{% if column.aliases|length > 0 %}\
+      {"{{column.name}}", {% raw %}{{% endraw %}\
+{% for alias in column.aliases %}"{{alias}}"\
+{% if not loop.last %}, {% endif %}\
+{% endfor %}}},
+{% endif %}\
+{% endfor %}\
+    };
+  }
+{% endif %}\
+
+    QueryData generate(QueryContext& request) override { return QueryData(); }
   };
 
   Registry::add<{{table_name_cc}}TablePlugin>("table", "{{table_name}}");

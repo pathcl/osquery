@@ -35,6 +35,7 @@ using SQLiteDBInstanceRef = std::shared_ptr<SQLiteDBInstance>;
  *
  * Details of this map are defined at: http://www.sqlite.org/c3ref/c_abort.html
  */
+// clang-format off
 const std::map<int, std::string> kSQLiteReturnCodes = {
     {0, "SQLITE_OK"},        {1, "SQLITE_ERROR"},       {2, "SQLITE_INTERNAL"},
     {3, "SQLITE_PERM"},      {4, "SQLITE_ABORT"},       {5, "SQLITE_BUSY"},
@@ -55,6 +56,7 @@ const std::map<std::string, std::string> kMemoryDBSettings = {
     {"journal_mode", "OFF"},     {"cache_size", "0"},
     {"page_count", "0"},
 };
+// clang-format on
 
 #define OpComparator(x) \
   { x, QueryPlanner::Opcode(OpReg::P2, INTEGER_TYPE) }
@@ -177,6 +179,10 @@ static inline void openOptimized(sqlite3*& db) {
     settings += "PRAGMA " + setting.first + "=" + setting.second + "; ";
   }
   sqlite3_exec(db, settings.c_str(), nullptr, nullptr, nullptr);
+
+  // Register function extensions.
+  registerMathExtensions(db);
+  registerStringExtensions(db);
 }
 
 void SQLiteDBInstance::init() {
@@ -287,7 +293,7 @@ Status QueryPlanner::applyTypes(TableColumns& columns) {
       auto k = boost::lexical_cast<size_t>(row.at("p1"));
       for (const auto& type : column_types) {
         if (type.first - k < columns.size()) {
-          columns[type.first - k].second = type.second;
+          std::get<1>(columns[type.first - k]) = type.second;
         }
       }
     }
@@ -379,7 +385,8 @@ Status getQueryColumnsInternal(const std::string& q,
       col_type = "UNKNOWN";
       unknown_type = true;
     }
-    results.push_back({col_name, columnTypeName(col_type)});
+    results.push_back(
+        std::make_tuple(col_name, columnTypeName(col_type), DEFAULT));
   }
 
   // An unknown type means we have to parse the plan and SQLite opcodes.

@@ -37,6 +37,15 @@
 namespace osquery {
 
 /**
+ * @brief osquery does not yet use a NULL type.
+ *
+ * If a column type is non-TEXT a NULL is defined as an empty result. The APIs
+ * may later define an explicit control set that is opaque to the table
+ * implementation.
+ */
+#define SQL_NULL_RESULT ""
+
+/**
  * @brief The SQLite type affinities are available as macros
  *
  * Type affinities: TEXT, INTEGER, BIGINT
@@ -46,15 +55,33 @@ namespace osquery {
  * types they are storing, and more importantly how they are treated at query
  * time.
  */
-#define TEXT(x) boost::lexical_cast<std::string>(x)
+template <typename Type>
+inline std::string __sqliteField(const Type& source) noexcept {
+  std::string dest;
+  if (!boost::conversion::try_lexical_convert(source, dest)) {
+    return SQL_NULL_RESULT;
+  }
+  return dest;
+}
+
+#ifdef WIN32
+// TEXT is also defined in windows.h, we should not re-define it
+#define SQL_TEXT(x) __sqliteField(x)
+#else
+// For everything except Windows, aldo define TEXT() to be compatible with
+// existing tables
+#define SQL_TEXT(x) __sqliteField(x)
+#define TEXT(x) __sqliteField(x)
+#endif
+
 /// See the affinity type documentation for TEXT.
-#define INTEGER(x) boost::lexical_cast<std::string>(x)
+#define INTEGER(x) __sqliteField(x)
 /// See the affinity type documentation for TEXT.
-#define BIGINT(x) boost::lexical_cast<std::string>(x)
+#define BIGINT(x) __sqliteField(x)
 /// See the affinity type documentation for TEXT.
-#define UNSIGNED_BIGINT(x) boost::lexical_cast<std::string>(x)
+#define UNSIGNED_BIGINT(x) __sqliteField(x)
 /// See the affinity type documentation for TEXT.
-#define DOUBLE(x) boost::lexical_cast<std::string>(x)
+#define DOUBLE(x) __sqliteField(x)
 
 /**
  * @brief The SQLite type affinities as represented as implementation literals.
@@ -89,11 +116,6 @@ enum ColumnType {
 /// Map of type constant to the SQLite string-name representation.
 extern const std::map<ColumnType, std::string> kColumnTypeNames;
 
-/// Helper alias for TablePlugin names.
-using TableName = std::string;
-using TableColumns = std::vector<std::pair<std::string, ColumnType>>;
-struct QueryContext;
-
 /**
  * @brief A ConstraintOperator is applied in an query predicate.
  *
@@ -115,6 +137,7 @@ enum ConstraintOperator : unsigned char {
 
 /// Type for flags for what constraint operators are admissible.
 typedef unsigned char ConstraintOperatorFlag;
+
 /// Flag for any operator type.
 #define ANY_OP 0xFFU
 
@@ -135,6 +158,82 @@ struct Constraint {
       : op(_op), expr(_expr) {}
 };
 
+/*
+ * @brief Column options allow for more-complicated modeling of concepts.
+ *
+ * To accommodate the oddities of operating system concepts we make use of
+ * simple SQLite abstractions like indexs/keys and foreign keys, we also
+ * allow for optimizing based on query constraints (WHERE).
+ *
+ * There are several 'complications' where the default table filter (SELECT)
+ * behavior attempts to mimic reality. Browser plugins or shell history are
+ * good examples, a SELECT without using a WHERE returns the plugins or
+ * history as it applies to the user running the query. If osquery is meant
+ * to be a daemon with absolute visibility this introduces an abnormality,
+ * as the expected result will only include the superuser's view, even if
+ * the superuser can view everything if they intended.
+ *
+ * The solution is to explicitly ask for everything, by joining against the
+ * users table. This options structure will allow the table implementations
+ * to communicate these subtleties to the user.
+ */
+enum ColumnOptions {
+  /// Default/no options.
+  DEFAULT = 0,
+
+  /// Treat this column as a primary key.
+  INDEX = 1,
+
+  /// This column MUST be included in the query predicate.
+  REQUIRED = 2,
+
+  /*
+   * @brief This column is used to generate additional information.
+   *
+   * If this column is included in the query predicate, the table will generate
+   * additional information. Consider the browser_plugins or shell history
+   * tables: by default they list the plugins or history relative to the user
+   * running the query. However, if the calling query specifies a UID explicitly
+   * in the predicate, the meaning of the table changes and results for that
+   * user are returned instead.
+   */
+  ADDITIONAL = 4,
+
+  /*
+   * @brief This column can be used to optimize the query.
+   *
+   * If this column is included in the query predicate, the table will generate
+   * optimized information. Consider the system_controls table, a default filter
+   * without a query predicate lists all of the keys. When a specific domain is
+   * included in the predicate then the table will only issue syscalls/lookups
+   * for that domain, greatly optimizing the time and utilization.
+   *
+   * This optimization does not mean the column is an index.
+   */
+  OPTIMIZED = 8,
+
+  /// This column should be hidden from '*'' selects.
+  HIDDEN = 16,
+};
+
+/// Treat column options as a set of flags.
+inline ColumnOptions operator|(ColumnOptions a, ColumnOptions b) {
+  return static_cast<ColumnOptions>(static_cast<int>(a) | static_cast<int>(b));
+}
+
+/// Helper alias for TablePlugin names.
+using TableName = std::string;
+
+/// Alias for an ordered list of column name and corresponding SQL type.
+using TableColumns =
+    std::vector<std::tuple<std::string, ColumnType, ColumnOptions>>;
+
+/// Alias for map of column alias sets.
+using ColumnAliasSet = std::map<std::string, std::set<std::string>>;
+
+/// Forward declaration of QueryContext for ConstraintList relationships.
+struct QueryContext;
+
 /**
  * @brief A ConstraintList is a set of constraints for a column. This list
  * should be mapped to a left-hand-side column name.
@@ -146,6 +245,9 @@ struct Constraint {
  * A constraint list supports all AS_LITERAL types, and all ConstraintOperators.
  */
 struct ConstraintList : private boost::noncopyable {
+ public:
+  ConstraintList() : affinity(TEXT_TYPE) {}
+
   /// The SQLite affinity type.
   ColumnType affinity;
 
@@ -275,8 +377,6 @@ struct ConstraintList : private boost::noncopyable {
   /// See ConstraintList::unserialize.
   void unserialize(const boost::property_tree::ptree& tree);
 
-  ConstraintList() : affinity(TEXT_TYPE) {}
-
  private:
   /// List of constraint operator/expressions.
   std::vector<struct Constraint> constraints_;
@@ -290,6 +390,7 @@ struct ConstraintList : private boost::noncopyable {
 
 /// Pass a constraint map to the query request.
 using ConstraintMap = std::map<std::string, struct ConstraintList>;
+
 /// Populate a constraint list from a query's parsed predicate.
 using ConstraintSet = std::vector<std::pair<std::string, struct Constraint>>;
 
@@ -310,8 +411,19 @@ using ConstraintSet = std::vector<std::pair<std::string, struct Constraint>>;
 struct VirtualTableContent {
   /// Friendly name for the table.
   TableName name;
+
   /// Table column structure, retrieved once via the TablePlugin call API.
   TableColumns columns;
+
+  /**
+   * @brief Table column aliases structure.
+   *
+   * This is used within xColumn to move content from special HIDDEN columns
+   * that act as aliases. If these columns are requested the content is moved
+   * from the new non-deprecated name.
+   */
+  std::map<std::string, size_t> aliases;
+
   /// Transient set of virtual table access constraints.
   std::unordered_map<size_t, ConstraintSet> constraints;
 
@@ -343,8 +455,8 @@ struct QueryContext : private boost::noncopyable {
 
   /// If the context was created without content, it is ephemeral.
   ~QueryContext() {
-    if (!enable_cache_) {
-      free(table_);
+    if (!enable_cache_ && table_ != nullptr) {
+      delete table_;
     }
   }
 
@@ -481,8 +593,8 @@ struct QueryContext : private boost::noncopyable {
   friend class TablePlugin;
 };
 
-typedef struct QueryContext QueryContext;
-typedef struct Constraint Constraint;
+using QueryContext = struct QueryContext;
+using Constraint = struct Constraint;
 
 /**
  * @brief The TablePlugin defines the name, types, and column information.
@@ -496,8 +608,21 @@ typedef struct Constraint Constraint;
  */
 class TablePlugin : public Plugin {
  protected:
+  /**
+   * @brief Table name aliases create full-scan VIEWs for tables.
+   *
+   * Aliases allow table names to be changed/deprecated without breaking
+   * existing deployments and scheduled queries.
+   *
+   * @return A string vector of qtable name aliases.
+   */
+  virtual std::vector<std::string> aliases() const { return {}; }
+
   /// Return the table's column name and type pairs.
   virtual TableColumns columns() const { return TableColumns(); }
+
+  /// Define a map of target columns to optional aliases.
+  virtual ColumnAliasSet columnAliases() const { return {}; }
 
   /**
    * @brief Generate a complete table representation.
@@ -632,7 +757,8 @@ class TablePlugin : public Plugin {
 std::string columnDefinition(const TableColumns& columns);
 
 /// Helper method to generate the virtual table CREATE statement.
-std::string columnDefinition(const PluginResponse& response);
+std::string columnDefinition(const PluginResponse& response,
+                             bool aliases = false);
 
 /// Get the string representation for an SQLite column type.
 inline const std::string& columnTypeName(ColumnType type) {

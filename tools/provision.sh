@@ -15,6 +15,7 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 BUILD_DIR="$SCRIPT_DIR/../build"
 WORKING_DIR="/tmp/osquery-provisioning"
 FILES_DIR="$SCRIPT_DIR/provision/files"
+FORMULA_DIR="$SCRIPT_DIR/provision/formula"
 DEPS_URL=https://osquery-packages.s3.amazonaws.com/deps
 export PATH="$PATH:/usr/local/bin"
 
@@ -74,6 +75,10 @@ function main() {
     log "detected freebsd ($DISTRO)"
     source "$SCRIPT_DIR/provision/freebsd.sh"
     main_freebsd
+  elif [[ $OS = "arch" ]]; then
+    log "detected arch ($DISTRO)"
+    source "$SCRIPT_DIR/provision/arch.sh"
+    main_arch
   elif [[ $OS = "fedora" ]]; then
     log "detected fedora ($DISTRO)"
     source "$SCRIPT_DIR/provision/fedora.sh"
@@ -91,6 +96,8 @@ function main() {
   # Pip may have just been installed.
   PIP=`which pip`
   sudo $PIP install --upgrade pip
+  # Previos command may change pip path (/usr/bin/pip to /usr/bin/local/pip)
+  PIP=`which pip`
   sudo $PIP install -r requirements.txt
 
   initialize $OS

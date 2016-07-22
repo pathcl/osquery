@@ -25,7 +25,8 @@ PACKAGE_NAME="osquery"
 if [[ $PACKAGE_VERSION == *"-"* ]]; then
   DESCRIPTION="$DESCRIPTION (unstable/latest version)"
 fi
-OUTPUT_PKG_PATH="$BUILD_DIR/$PACKAGE_NAME-$PACKAGE_VERSION."
+
+OUTPUT_PKG_PATH="$BUILD_DIR/${PACKAGE_NAME}-${PACKAGE_VERSION}."
 
 # Config files
 INITD_SRC="$SCRIPT_DIR/osqueryd.initd"
@@ -34,9 +35,12 @@ SYSTEMD_SERVICE_SRC="$SCRIPT_DIR/osqueryd.service"
 SYSTEMD_SERVICE_DST="/usr/lib/systemd/system/osqueryd.service"
 SYSTEMD_SYSCONFIG_SRC="$SCRIPT_DIR/osqueryd.sysconfig"
 SYSTEMD_SYSCONFIG_DST="/etc/sysconfig/osqueryd"
+SYSTEMD_SYSCONFIG_DST_DEBIAN="/etc/default/osqueryd"
 CTL_SRC="$SCRIPT_DIR/osqueryctl"
 PACKS_SRC="$SOURCE_DIR/packs"
 PACKS_DST="/usr/share/osquery/packs/"
+OSQUERY_POSTINSTALL=${OSQUERY_POSTINSTALL:-""}
+OSQUERY_CONFIG_SRC=${OSQUERY_CONFIG_SRC:-""}
 OSQUERY_EXAMPLE_CONFIG_SRC="$SCRIPT_DIR/osquery.example.conf"
 OSQUERY_EXAMPLE_CONFIG_DST="/usr/share/osquery/osquery.example.conf"
 OSQUERY_LOG_DIR="/var/log/osquery/"
@@ -61,6 +65,12 @@ function parse_args() {
     case $1 in
       -t | --type )           shift
                               PACKAGE_TYPE=$1
+                              ;;
+      -c | --config )         shift
+                              OSQUERY_CONFIG_SRC=$1
+                              ;;
+      -p | --postinst )       shift
+                              OSQUERY_POSTINSTALL=$1
                               ;;
       -i | --iteration )      shift
                               PACKAGE_ITERATION=$1
@@ -112,7 +122,17 @@ function main() {
   cp $OSQUERY_EXAMPLE_CONFIG_SRC $INSTALL_PREFIX$OSQUERY_EXAMPLE_CONFIG_DST
   cp $PACKS_SRC/* $INSTALL_PREFIX/$PACKS_DST
 
-  if [[ $DISTRO = "centos7" || $DISTRO = "rhel7" ]]; then
+  if [[ $OSQUERY_CONFIG_SRC != "" ]] && [[ -f $OSQUERY_CONFIG_SRC ]]; then
+    log "config setup"
+    cp $OSQUERY_CONFIG_SRC $INSTALL_PREFIX/$OSQUERY_ETC_DIR/osquery.conf
+  fi
+
+  if [[ $DISTRO = "xenial" ]]; then
+    #Change config path to Ubuntu/Xenial default
+    SYSTEMD_SYSCONFIG_DST=$SYSTEMD_SYSCONFIG_DST_DEBIAN
+  fi
+
+  if [[ $DISTRO = "centos7" || $DISTRO = "rhel7" || $DISTRO = "xenial" ]]; then
     # Install the systemd service and sysconfig
     mkdir -p `dirname $INSTALL_PREFIX$SYSTEMD_SERVICE_DST`
     mkdir -p `dirname $INSTALL_PREFIX$SYSTEMD_SYSCONFIG_DST`
@@ -121,6 +141,11 @@ function main() {
   else
     mkdir -p `dirname $INSTALL_PREFIX$INITD_DST`
     cp $INITD_SRC $INSTALL_PREFIX$INITD_DST
+  fi
+
+  if [[ $DISTRO = "xenial" ]]; then
+    #Change config path in service unit
+    sed -i 's/sysconfig/default/g' $INSTALL_PREFIX$SYSTEMD_SERVICE_DST
   fi
 
   log "creating package"
@@ -139,6 +164,17 @@ function main() {
     FPM="/var/lib/gems/1.8/bin/fpm"
   fi
 
+# some tune to stay compliant with Debian package naming convention
+  if [[ $PACKAGE_TYPE == "deb" ]]; then
+    DEB_PACKAGE_ARCH=`dpkg --print-architecture`
+    OUTPUT_PKG_PATH="$BUILD_DIR/${PACKAGE_NAME}_${PACKAGE_VERSION}_${DEB_PACKAGE_ARCH}.deb"
+  fi
+
+  POSTINST_CMD=""
+  if [[ $OSQUERY_POSTINSTALL != "" ]] && [[ -f $OSQUERY_POSTINSTALL ]]; then
+    POSTINST_CMD="--after-install $OSQUERY_POSTINSTALL"
+  fi
+
   EPILOG="--url https://osquery.io \
     -m osquery@osquery.io          \
     --vendor Facebook              \
@@ -149,6 +185,7 @@ function main() {
     -n $PACKAGE_NAME -v $PACKAGE_VERSION \
     --iteration $PACKAGE_ITERATION \
     -a $PACKAGE_ARCH               \
+    $POSTINST_CMD                  \
     $PACKAGE_DEPENDENCIES          \
     -p $OUTPUT_PKG_PATH            \
     $EPILOG \"$INSTALL_PREFIX/=/\""

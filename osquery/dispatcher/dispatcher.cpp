@@ -15,13 +15,7 @@
 #include <osquery/logger.h>
 
 #include "osquery/core/conversions.h"
-
-#if 0
-#ifdef DLOG
-#undef DLOG
-#define DLOG(v) LOG(v)
-#endif
-#endif
+#include "osquery/core/process.h"
 
 namespace osquery {
 
@@ -68,6 +62,14 @@ void InterruptableRunnable::pauseMilli(std::chrono::milliseconds milli) {
   }
 }
 
+void InternalRunnable::run() {
+  run_ = true;
+  start();
+
+  // The service is complete.
+  Dispatcher::removeService(this);
+}
+
 Status Dispatcher::addService(InternalRunnableRef service) {
   if (service->hasRun()) {
     return Status(1, "Cannot schedule a service twice");
@@ -83,11 +85,25 @@ Status Dispatcher::addService(InternalRunnableRef service) {
   auto thread = std::make_shared<std::thread>(
       std::bind(&InternalRunnable::run, &*service));
   WriteLock lock(self.mutex_);
-  DLOG(INFO) << "Adding new service: " << &*service
-             << " to thread: " << &*thread;
+  DLOG(INFO) << "Adding new service: " << service.get()
+             << " to thread: " << thread.get();
   self.service_threads_.push_back(thread);
   self.services_.push_back(std::move(service));
   return Status(0, "OK");
+}
+
+void Dispatcher::removeService(const InternalRunnable* service) {
+  auto& self = Dispatcher::instance();
+  WriteLock lock(self.mutex_);
+
+  // Remove the service.
+  self.services_.erase(
+      std::remove_if(self.services_.begin(),
+                     self.services_.end(),
+                     [service](const InternalRunnableRef& target) {
+                       return (target.get() == service);
+                     }),
+      self.services_.end());
 }
 
 void Dispatcher::joinServices() {
@@ -99,7 +115,7 @@ void Dispatcher::joinServices() {
     // Boost threads would have been interrupted, and joined using the
     // provided thread instance.
     thread->join();
-    DLOG(INFO) << "Service thread: " << &*thread << " has joined";
+    DLOG(INFO) << "Service thread: " << thread.get() << " has joined";
   }
 
   WriteLock lock(self.mutex_);
@@ -125,10 +141,10 @@ void Dispatcher::stopServices() {
       }
       // We only need to check if std::terminate is called very quickly after
       // the std::thread is created.
-      ::usleep(20);
+      sleepFor(20);
     }
     service->interrupt();
-    DLOG(INFO) << "Service: " << &*service << " has been interrupted";
+    DLOG(INFO) << "Service: " << service.get() << " has been interrupted";
   }
 }
 }

@@ -13,8 +13,8 @@
 #include <boost/algorithm/string/join.hpp>
 
 #include <aws/core/utils/Outcome.h>
-#include <aws/firehose/model/ListDeliveryStreamsRequest.h>
-#include <aws/firehose/model/ListDeliveryStreamsResult.h>
+#include <aws/firehose/model/DescribeDeliveryStreamRequest.h>
+#include <aws/firehose/model/DescribeDeliveryStreamResult.h>
 #include <aws/firehose/model/PutRecordBatchRequest.h>
 #include <aws/firehose/model/PutRecordBatchResponseEntry.h>
 #include <aws/firehose/model/PutRecordBatchResult.h>
@@ -42,6 +42,7 @@ const size_t FirehoseLogForwarder::kFirehoseMaxRecords = 500;
 const size_t FirehoseLogForwarder::kFirehoseMaxLogBytes = 1000000 - 256;
 
 Status FirehoseLoggerPlugin::setUp() {
+  initAwsSdk();
   forwarder_ = std::make_shared<FirehoseLogForwarder>();
   Status s = forwarder_->setUp();
   if (!s.ok()) {
@@ -60,12 +61,17 @@ Status FirehoseLogForwarder::send(std::vector<std::string>& log_data,
                                   const std::string& log_type) {
   std::vector<Aws::Firehose::Model::Record> records;
   for (const std::string& log : log_data) {
-    if (log.size() > kFirehoseMaxLogBytes) {
+    if (log.size() + 1 > kFirehoseMaxLogBytes) {
       LOG(ERROR) << "Firehose log too big, discarding!";
     }
     Aws::Firehose::Model::Record record;
-    record.WithData(
-        Aws::Utils::ByteBuffer((unsigned char*)log.c_str(), log.length()));
+    auto buffer =
+        Aws::Utils::ByteBuffer((unsigned char*)log.c_str(), log.length() + 1);
+    // Firehose buffers together the individual records, so we must insert
+    // newlines here if we want newlines in the resultant files after Firehose
+    // processing. See http://goo.gl/Pz6XOj
+    buffer[log.length()] = '\n';
+    record.SetData(buffer);
     records.push_back(std::move(record));
   }
 
@@ -105,18 +111,14 @@ Status FirehoseLogForwarder::setUp() {
   }
 
   // Make sure we can connect to designated stream
-  Aws::Firehose::Model::ListDeliveryStreamsRequest r;
-  auto result = client_->ListDeliveryStreams(r).GetResult();
-  std::vector<std::string> stream_names = result.GetDeliveryStreamNames();
+  Aws::Firehose::Model::DescribeDeliveryStreamRequest r;
+  r.SetDeliveryStreamName(FLAGS_aws_firehose_stream);
 
-  if (std::find(stream_names.begin(),
-                stream_names.end(),
-                FLAGS_aws_firehose_stream) == stream_names.end()) {
-    return Status(1,
-                  "Could not find Firehose delivery stream: " +
-                      FLAGS_aws_firehose_stream);
+  auto outcome = client_->DescribeDeliveryStream(r);
+  if (!outcome.IsSuccess()) {
+    return Status(
+        1, "Could not find Firehose stream: " + FLAGS_aws_firehose_stream);
   }
-
   VLOG(1) << "Firehose logging initialized with stream: "
           << FLAGS_aws_firehose_stream;
   return Status(0);

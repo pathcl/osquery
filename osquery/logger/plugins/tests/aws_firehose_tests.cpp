@@ -20,8 +20,9 @@
 
 #include <osquery/logger.h>
 
-#include "osquery/core/test_util.h"
+#include "osquery/tests/test_util.h"
 #include "osquery/logger/plugins/aws_firehose.h"
+#include "osquery/logger/plugins/aws_util.h"
 
 using namespace testing;
 
@@ -42,7 +43,10 @@ class MockFirehoseClient : public Aws::Firehose::FirehoseClient {
           const Aws::Firehose::Model::PutRecordBatchRequest& request));
 };
 
-class FirehoseTests : public testing::Test {};
+class FirehoseTests : public testing::Test {
+ public:
+  void SetUp() override { initAwsSdk(); }
+};
 
 TEST_F(FirehoseTests, test_send) {
   FirehoseLogForwarder forwarder;
@@ -55,7 +59,7 @@ TEST_F(FirehoseTests, test_send) {
   EXPECT_CALL(*client,
               PutRecordBatch(Property(
                   &Aws::Firehose::Model::PutRecordBatchRequest::GetRecords,
-                  ElementsAre(MatchesEntry("foo")))))
+                  ElementsAre(MatchesEntry("foo\n")))))
       .WillOnce(Return(outcome));
   EXPECT_EQ(Status(0), forwarder.send(logs, "results"));
 
@@ -70,7 +74,7 @@ TEST_F(FirehoseTests, test_send) {
   EXPECT_CALL(*client,
               PutRecordBatch(Property(
                   &Aws::Firehose::Model::PutRecordBatchRequest::GetRecords,
-                  ElementsAre(MatchesEntry("bar"), MatchesEntry("foo")))))
+                  ElementsAre(MatchesEntry("bar\n"), MatchesEntry("foo\n")))))
       .WillOnce(Return(outcome));
   EXPECT_EQ(Status(1, "Foo error"), forwarder.send(logs, "results"));
 }

@@ -8,6 +8,11 @@
  *
  */
 
+#ifdef GTEST_HAS_TR1_TUPLE
+#undef GTEST_HAS_TR1_TUPLE
+#define GTEST_HAS_TR1_TUPLE 0
+#endif
+
 #include <stdexcept>
 
 #include <gtest/gtest.h>
@@ -15,7 +20,8 @@
 #include <osquery/extensions.h>
 #include <osquery/filesystem.h>
 
-#include "osquery/core/test_util.h"
+#include "osquery/core/process.h"
+#include "osquery/tests/test_util.h"
 #include "osquery/extensions/interface.h"
 
 using namespace osquery::extensions;
@@ -50,7 +56,7 @@ class ExtensionsTest : public testing::Test {
         client.get()->ping(status);
         return (status.code == ExtensionCode::EXT_SUCCESS);
       } catch (const std::exception& e) {
-        ::usleep(kDelayUS);
+        sleepFor(kDelayUS / 1000);
       }
     }
 
@@ -65,7 +71,7 @@ class ExtensionsTest : public testing::Test {
         EXManagerClient client(socket_path);
         client.get()->query(response, sql);
       } catch (const std::exception& e) {
-        ::usleep(kDelayUS);
+        sleepFor(kDelayUS / 1000);
       }
     }
 
@@ -95,7 +101,7 @@ class ExtensionsTest : public testing::Test {
       if (pathExists(socket_path).ok() && isReadable(socket_path).ok()) {
         return true;
       }
-      ::usleep(kDelayUS);
+      sleepFor(kDelayUS / 1000);
       delay += kDelayUS;
     }
     return false;

@@ -13,6 +13,10 @@
 #include <string>
 #include <vector>
 
+#ifdef WIN32
+#define GLOG_NO_ABBREVIATED_SEVERITIES
+#endif
+
 #include <glog/logging.h>
 
 #include <osquery/database.h>
@@ -302,6 +306,17 @@ Status logSnapshotQuery(const QueryLogItem& item);
  * are all protected as a monitored worker.
  */
 void relayStatusLogs();
+
+/**
+ * @brief Write a log line to the OS system log.
+ *
+ * There are occasional needs to log independently of the osquery logging
+ * facilities. This allows a feature (not a table) to bypass all osquery
+ * configuration and log to the OS system log.
+ *
+ * Linux/Darwin: this uses syslog's LOG_NOTICE.
+ */
+void systemLog(const std::string& line);
 
 /**
  * @brief Logger plugin registry.

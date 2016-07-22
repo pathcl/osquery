@@ -14,7 +14,7 @@
 #include <osquery/tables.h>
 #include <osquery/sql.h>
 
-#include "osquery/core/test_util.h"
+#include "osquery/tests/test_util.h"
 
 namespace osquery {
 namespace tables {
@@ -65,37 +65,29 @@ TEST_F(SystemsTablesTests, test_processes) {
 TEST_F(SystemsTablesTests, test_abstract_joins) {
   // Codify several assumptions about how tables should be joined into tests.
   // The first is an implicit inner join from processes to file information.
-  auto results = SQL(
-      "select * from (select pid, path from processes where path <> '' limit "
-      "1) p join file using (path);");
+  std::string join_preamble =
+      "select * from (select path from osquery_info join processes using "
+      "(pid)) p";
+  auto results = SQL(join_preamble + " join file using (path);");
   ASSERT_EQ(results.rows().size(), 1U);
 
   // The same holds for an explicit left join.
-  results = SQL(
-      "select * from (select pid, path from processes where path <> '' limit "
-      "1) p left join file using (path);");
+  results = SQL(join_preamble + "left join file using (path);");
   ASSERT_EQ(results.rows().size(), 1U);
 
   // A secondary inner join against hash.
-  results = SQL(
-      "select * from (select pid, path from processes where path <> '' limit "
-      "1) p join file using (path) join hash using (path);");
+  results =
+      SQL(join_preamble + " join file using (path) join hash using (path);");
   ASSERT_EQ(results.rows().size(), 1U);
 
-  results = SQL(
-      "select * from (select pid, path from processes where path <> '' limit "
-      "1) p left join file using (path) left join hash using (path);");
+  results = SQL(join_preamble +
+                " left join file using (path) left join hash using (path);");
   ASSERT_EQ(results.rows().size(), 1U);
 
-  // Check that a nested subselect on the same virtual table can perform and
-  // inner join on a LIKE operand. It would be awesome if the base join against
-  // hash did not need an explicit left join.
-  results = SQL(
-      "select * from (select file.* from (select * from file where directory = "
-      "'/etc' and type = 'directory' and mode = '0755') f join file on "
-      "file.path LIKE f.path || '/%' where file.type = 'regular') left join "
-      "hash using (path);");
-  ASSERT_GT(results.rows().size(), 0U);
+  // Check LIKE and = operands.
+  results =
+      SQL("select path from file where path = '/etc/' or path LIKE '/dev/%'");
+  ASSERT_GT(results.rows().size(), 1U);
 }
 }
 }

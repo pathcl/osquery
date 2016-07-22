@@ -26,7 +26,7 @@ namespace osquery {
 
 FLAG(string,
      logger_path,
-     "/var/log/osquery/",
+     OSQUERY_LOG_HOME,
      "Directory path for ERROR/WARN/INFO and results logging");
 /// Legacy, backward compatible "osquery_log_dir" CLI option.
 FLAG_ALIAS(std::string, osquery_log_dir, logger_path);
@@ -148,9 +148,10 @@ void FilesystemLoggerPlugin::init(const std::string& name,
 
   // We may violate Glog global object assumptions. So set names manually.
   auto basename = (log_path_ / name).string();
-  google::SetLogDestination(google::INFO, (basename + ".INFO.").c_str());
-  google::SetLogDestination(google::WARNING, (basename + ".WARNING.").c_str());
-  google::SetLogDestination(google::ERROR, (basename + ".ERROR.").c_str());
+
+  google::SetLogDestination(google::GLOG_INFO, (basename + ".INFO.").c_str());
+  google::SetLogDestination(google::GLOG_WARNING, (basename + ".WARNING.").c_str());
+  google::SetLogDestination(google::GLOG_ERROR, (basename + ".ERROR.").c_str());
 
   // Store settings for logging to stderr.
   bool log_to_stderr = FLAGS_logtostderr;

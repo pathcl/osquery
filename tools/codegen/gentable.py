@@ -72,6 +72,21 @@ NETWORK = "NETWORK"
 EVENTS = "EVENTS"
 APPLICATION = "APPLICATION"
 
+# This should mimic the C++ enumeration ColumnOptions in table.h
+COLUMN_OPTIONS = {
+    "index": "INDEX",
+    "additional": "ADDITIONAL",
+    "required": "REQUIRED",
+    "optimized": "OPTIMIZED",
+}
+
+# Column options that render tables uncacheable.
+NON_CACHEABLE = [
+    "REQUIRED",
+    "ADDITIONAL",
+    "OPTIMIZED",
+]
+
 
 def usage():
     """ print program usage """
@@ -168,6 +183,9 @@ class TableState(Singleton):
         self.description = ""
         self.attributes = {}
         self.examples = []
+        self.aliases = []
+        self.has_options = False
+        self.has_column_aliases = False
 
     def columns(self):
         return [i for i in self.schema if isinstance(i, Column)]
@@ -178,25 +196,24 @@ class TableState(Singleton):
     def generate(self, path, template="default"):
         """Generate the virtual table files"""
         logging.debug("TableState.generate")
-        self.impl_content = jinja2.Template(TEMPLATES[template]).render(
-            table_name=self.table_name,
-            table_name_cc=to_camel_case(self.table_name),
-            schema=self.columns(),
-            header=self.header,
-            impl=self.impl,
-            function=self.function,
-            class_name=self.class_name,
-            attributes=self.attributes,
-            examples=self.examples,
-        )
 
-        column_options = []
+        all_options = []
+        # Create a list of column options from the kwargs passed to the column.
         for column in self.columns():
-            column_options += column.options
-        non_cachable = ["index", "required", "additional", "superuser"]
-        if "cachable" in self.attributes:
-            if len(set(column_options).intersection(non_cachable)) > 0:
-                print(lightred("Table cannot be marked cachable: %s" % (path)))
+            column_options = []
+            for option in column.options:
+                # Only allow explicitly-defined options.
+                if option in COLUMN_OPTIONS:
+                    column_options.append(COLUMN_OPTIONS[option])
+                    all_options.append(COLUMN_OPTIONS[option])
+            column.options_set = " | ".join(column_options)
+            if len(column.aliases) > 0:
+                self.has_column_aliases = True
+        if len(all_options) > 0:
+            self.has_options = True
+        if "cacheable" in self.attributes:
+            if len(set(all_options).intersection(NON_CACHEABLE)) > 0:
+                print(lightred("Table cannot be marked cacheable: %s" % (path)))
                 exit(1)
         if self.table_name == "" or self.function == "":
             print(lightred("Invalid table spec: %s" % (path)))
@@ -222,6 +239,21 @@ class TableState(Singleton):
                     # May encounter a race when using a make jobserver.
                     pass
         logging.debug("generating %s" % path)
+        self.impl_content = jinja2.Template(TEMPLATES[template]).render(
+            table_name=self.table_name,
+            table_name_cc=to_camel_case(self.table_name),
+            schema=self.columns(),
+            header=self.header,
+            impl=self.impl,
+            function=self.function,
+            class_name=self.class_name,
+            attributes=self.attributes,
+            examples=self.examples,
+            aliases=self.aliases,
+            has_options=self.has_options,
+            has_column_aliases=self.has_column_aliases,
+        )
+
         with open(path, "w+") as file_h:
             file_h.write(self.impl_content)
 
@@ -241,10 +273,11 @@ class Column(object):
     documentation generation and reference.
     """
 
-    def __init__(self, name, col_type, description="", **kwargs):
+    def __init__(self, name, col_type, description="", aliases=[], **kwargs):
         self.name = name
         self.type = col_type
         self.description = description
+        self.aliases = aliases
         self.options = kwargs
 
 
@@ -260,7 +293,7 @@ class ForeignKey(object):
         self.table = kwargs.get("table", "")
 
 
-def table_name(name):
+def table_name(name, aliases=[]):
     """define the virtual table name"""
     logging.debug("- table_name")
     logging.debug("  - called with: %s" % name)
@@ -268,6 +301,7 @@ def table_name(name):
     table.description = ""
     table.attributes = {}
     table.examples = []
+    table.aliases = aliases
 
 
 def schema(schema_list):

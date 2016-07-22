@@ -11,8 +11,9 @@
 #include <gtest/gtest.h>
 
 #include <osquery/logger.h>
+#include <osquery/system.h>
 
-#include "osquery/core/test_util.h"
+#include "osquery/tests/test_util.h"
 #include "osquery/sql/sqlite_util.h"
 #include "osquery/dispatcher/scheduler.h"
 

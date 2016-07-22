@@ -15,10 +15,11 @@
 
 #include <osquery/core.h>
 #include <osquery/flags.h>
+#include <osquery/system.h>
 
 #include "osquery/core/conversions.h"
 
-#include "osquery/core/test_util.h"
+#include "osquery/tests/test_util.h"
 
 #define EXPECT_WITHIN_INCLUSIVE(lower, upper, val)                     \
   do {                                                                 \

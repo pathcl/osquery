@@ -13,14 +13,17 @@
 #include <boost/algorithm/string/join.hpp>
 
 #include <aws/core/utils/Outcome.h>
-#include <aws/kinesis/model/ListStreamsRequest.h>
-#include <aws/kinesis/model/ListStreamsResult.h>
+#include <aws/kinesis/model/DescribeStreamRequest.h>
+#include <aws/kinesis/model/DescribeStreamResult.h>
 #include <aws/kinesis/model/PutRecordsRequest.h>
 #include <aws/kinesis/model/PutRecordsRequestEntry.h>
 #include <aws/kinesis/model/PutRecordsResult.h>
+#include <boost/uuid/uuid_generators.hpp>
+#include <boost/uuid/uuid_io.hpp>
 
 #include <osquery/flags.h>
 #include <osquery/registry.h>
+#include <osquery/system.h>
 
 #include "osquery/logger/plugins/aws_kinesis.h"
 #include "osquery/logger/plugins/aws_util.h"
@@ -34,6 +37,10 @@ FLAG(uint64,
      10,
      "Seconds between flushing logs to Kinesis (default 10)");
 FLAG(string, aws_kinesis_stream, "", "Name of Kinesis stream for logging")
+FLAG(bool,
+     aws_kinesis_random_partition_key,
+     false,
+     "Enable random kinesis partition keys");
 
 // This is the max per AWS docs
 const size_t KinesisLogForwarder::kKinesisMaxRecords = 500;
@@ -41,6 +48,7 @@ const size_t KinesisLogForwarder::kKinesisMaxRecords = 500;
 const size_t KinesisLogForwarder::kKinesisMaxLogBytes = 1000000 - 256;
 
 Status KinesisLoggerPlugin::setUp() {
+  initAwsSdk();
   forwarder_ = std::make_shared<KinesisLogForwarder>();
   Status s = forwarder_->setUp();
   if (!s.ok()) {
@@ -63,8 +71,13 @@ Status KinesisLogForwarder::send(std::vector<std::string>& log_data,
       LOG(ERROR) << "Kinesis log too big, discarding!";
     }
     Aws::Kinesis::Model::PutRecordsRequestEntry entry;
-    entry.WithPartitionKey(shard_id_).WithData(
-        Aws::Utils::ByteBuffer((unsigned char*)log.c_str(), log.length()));
+    if (FLAGS_aws_kinesis_random_partition_key) {
+      boost::uuids::uuid uuid = boost::uuids::random_generator()();
+      partition_key_ = boost::uuids::to_string(uuid);
+    }
+    entry.WithPartitionKey(partition_key_)
+        .WithData(
+            Aws::Utils::ByteBuffer((unsigned char*)log.c_str(), log.length()));
     entries.push_back(std::move(entry));
   }
 
@@ -97,24 +110,20 @@ Status KinesisLogForwarder::setUp() {
     return s;
   }
 
-  shard_id_ = getHostIdentifier();
+  partition_key_ = getHostIdentifier();
 
   if (FLAGS_aws_kinesis_stream.empty()) {
     return Status(1, "Stream name must be specified with --aws_kinesis_stream");
   }
 
   // Make sure we can connect to designated stream
-  Aws::Kinesis::Model::ListStreamsRequest r;
-  auto result = client_->ListStreams(r).GetResult();
-  std::vector<std::string> stream_names = result.GetStreamNames();
-
-  if (std::find(stream_names.begin(),
-                stream_names.end(),
-                FLAGS_aws_kinesis_stream) == stream_names.end()) {
+  Aws::Kinesis::Model::DescribeStreamRequest r;
+  r.SetStreamName(FLAGS_aws_kinesis_stream);
+  auto outcome = client_->DescribeStream(r);
+  if (!outcome.IsSuccess()) {
     return Status(1,
                   "Could not find Kinesis stream: " + FLAGS_aws_kinesis_stream);
   }
-
   VLOG(1) << "Kinesis logging initialized with stream: "
           << FLAGS_aws_kinesis_stream;
   return Status(0);

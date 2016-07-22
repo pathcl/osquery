@@ -492,7 +492,7 @@ class EventSubscriberPlugin : public Plugin {
    *
    * @return The query-time table data, retrieved from a backing store.
    */
-  virtual QueryData genTable(QueryContext& context) __attribute__((used));
+  virtual QueryData genTable(QueryContext& context) USED_SYMBOL;
 
   /// Number of Subscription%s this EventSubscriber has used.
   size_t numSubscriptions() const { return subscription_count_; }
@@ -984,7 +984,4 @@ class EventSubscriber : public EventSubscriberPlugin {
 /// Iterate the event publisher registry and create run loops for each using
 /// the event factory.
 void attachEvents();
-
-CREATE_REGISTRY(EventPublisherPlugin, "event_publisher");
-CREATE_REGISTRY(EventSubscriberPlugin, "event_subscriber");
 }

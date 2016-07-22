@@ -314,7 +314,7 @@ function install_gflags() {
 }
 
 function install_google_benchmark() {
-  SOURCE=benchmark-0.1.0
+  SOURCE=benchmark-1.0.0
   TARBALL=$SOURCE.tar.gz
   URL=$DEPS_URL/$TARBALL
 
@@ -423,7 +423,7 @@ function install_libcryptsetup() {
 }
 
 function install_aws_sdk() {
-  SOURCE=aws-sdk-cpp-0.10.6
+  SOURCE=aws-sdk-cpp-0.12.4
   TARBALL=$SOURCE.tar.gz
   URL=$DEPS_URL/$TARBALL
 
@@ -433,12 +433,11 @@ function install_aws_sdk() {
     pushd ${SOURCE}/build
     CMAKE_FLAGS="-Wno-dev -DCMAKE_INSTALL_PREFIX=${PREFIX} \
                -DCMAKE_BUILD_TYPE=Release \
-               -DBUILD_ONLY=aws-cpp-sdk-kinesis;aws-cpp-sdk-firehose \
+               -DBUILD_ONLY=kinesis;firehose \
                -DSTATIC_LINKING=1 -DNO_HTTP_CLIENT=1"
     cmake $CMAKE_FLAGS ..
     make -j$THREADS
     sudo make install
-    sudo ln -s ${PREFIX}/lib/linux/intel64/Release/libaws-cpp-sdk-* ${PREFIX}/lib
     popd
   fi
 }
@@ -548,6 +547,40 @@ function install_ruby() {
   fi
 }
 
+# json_element JSON STRUCT
+#   1: JSON blob
+#   2: parse structure
+function json_element() {
+  CMD="import json,sys;obj=json.load(sys.stdin);print ${2}"
+  RESULT=`(echo "${1}" | python -c "${CMD}") || echo 'NAN'`
+  echo $RESULT
+}
+
+# local_brew NAME
+#   1: formula name
+function local_brew() {
+  FORMULA="${FORMULA_DIR}/$1.rb"
+  INFO=`brew info --json=v1 "${FORMULA}"`
+  INSTALLED=$(json_element "${INFO}" 'obj[0]["linked_keg"]')
+  STABLE=$(json_element "${INFO}" 'obj[0]["versions"]["stable"]')
+
+  # Could improve this detection logic to remove from-bottle.
+  FROM_BOTTLE=false
+
+  export HOMEBREW_MAKE_JOBS=$THREADS
+  export HOMEBREW_NO_EMOJI=1
+  if [[ "${INSTALLED}" = "NAN" || "${INSTALLED}" = "None" ]]; then
+    log "local package $1 installing new version: ${STABLE}"
+    brew install -v --build-bottle "${FORMULA}"
+  elif [[ ! "${INSTALLED}" = "${STABLE}" || "${FROM_BOTTLE}" = "true" ]]; then
+    log "local package $1 upgrading to new version: ${STABLE}"
+    brew uninstall "${FORMULA}"
+    brew install -v --build-bottle "${FORMULA}"
+  else
+    log "local package $1 is already install: ${STABLE}"
+  fi
+}
+
 function package() {
   if [[ $FAMILY = "debian" ]]; then
     INSTALLED=`dpkg-query -W -f='${Status} ${Version}\n' $1 || true`
@@ -555,7 +588,7 @@ function package() {
       log "$1 is already installed. skipping."
     else
       log "installing $1"
-      sudo DEBIAN_FRONTEND=noninteractive apt-get install $1 -y --no-install-recommends
+      sudo DEBIAN_FRONTEND=noninteractive apt-get install $1 -y -q --no-install-recommends
     fi
   elif [[ $FAMILY = "redhat" ]]; then
     if [[ ! -n "$(rpm -V $1)" ]]; then
@@ -602,6 +635,13 @@ function package() {
       log "installing $1"
       sudo pkg install -y $1
     fi
+  elif [[ $OS = "arch" ]]; then
+    if pacman -Qq $1 >/dev/null; then
+      log "$1 is already installed. skipping."
+    else
+      log "installing $1"
+      sudo pacman -S --noconfirm $1
+    fi
   fi
 }
 
@@ -631,6 +671,13 @@ function remove_package() {
     if ! pkg info -q $1; then
       log "removing $1"
       sudo pkg delete -y $1
+    else
+      log "Removing: $1 is not installed. skipping."
+    fi
+  elif [[ $OS = "arch" ]]; then
+    if ! pacman -Qq $1 >/dev/null; then
+      log "removing $1"
+      sudo pacman -R --noconfirm $1
     else
       log "Removing: $1 is not installed. skipping."
     fi
