@@ -18,8 +18,8 @@ DARWIN_KERNEL_VERSION="10.11"
 
 function platform() {
   local  __out=$1
-  FAMILY="`python $LIB_SCRIPT_DIR/get_platform.py --family`"
-  eval $__out=`python $LIB_SCRIPT_DIR/get_platform.py --platform`
+  FAMILY=$(python "$LIB_SCRIPT_DIR/get_platform.py" --family)
+  eval $__out=$(python "$LIB_SCRIPT_DIR/get_platform.py" --platform)
 }
 
 function _platform() {
@@ -29,7 +29,7 @@ function _platform() {
 
 function distro() {
   local __out=$2
-  eval $__out=`python $LIB_SCRIPT_DIR/get_platform.py --distro`
+  eval $__out=$(python "$LIB_SCRIPT_DIR/get_platform.py" --distro)
 }
 
 function _distro() {
@@ -100,26 +100,68 @@ function build_kernel_cleanup() {
   $MAKE kernel-test-unload || sudo reboot
 }
 
-function initialize() {
-  DISTRO=$1
-
+function checkout_thirdparty() {
   # Reset any work or artifacts from build tests in TP.
   (cd third-party && git reset --hard HEAD)
   git submodule init
   git submodule update
+}
+
+function build_target() {
+  threads THREADS
+
+  # Clean previous build artifacts.
+  $MAKE clean
+
+  # Build osquery.
+  if [[ -z "$RUN_TARGET" ]]; then
+    $MAKE -j$THREADS
+  else
+    $MAKE $RUN_TARGET -j$THREADS
+  fi
+}
+
+function check_deterministic() {
+  # Expect the project to have been built.
+  ALIAS=$DISTRO
+  if [[ "$OS" = "darwin" ]]; then
+    ALIAS=darwin
+  fi
+  DAEMON=build/$ALIAS/osquery/osqueryd
+  strip $DAEMON
+  RUN1=$(shasum -a 256 $DAEMON)
+
+  # Build again.
+  $MAKE distclean
+  build_target
+
+  strip $DAEMON
+  RUN2=$(shasum -a 256 $DAEMON)
+  echo "Initial build: $RUN1"
+  echo " Second build: $RUN2"
+  if [[ "$RUN1" = "$RUN2" ]]; then
+    exit 0
+  fi
+
+  # The build is not deterministic.
+  exit 1
+}
+
+function initialize() {
+  DISTRO=$1
+  checkout_thirdparty
 
   # Remove any previously-cached variables
   rm build/$DISTRO/CMakeCache.txt >/dev/null 2>&1 || true
 }
 
 function build() {
-  threads THREADS
   platform PLATFORM
   distro $PLATFORM DISTRO
 
   # Build kernel extension/module and tests.
   BUILD_KERNEL=0
-  if [[ "$PLATFORM" = "darwin" ]]; then
+  if [[ -z "$SKIP_KERNEL" && "$PLATFORM" = "darwin" ]]; then
     if [[ "$DISTRO" = "$DARWIN_KERNEL_VERSION" ]]; then
       BUILD_KERNEL=1
     fi
@@ -141,15 +183,8 @@ function build() {
     initialize $DISTRO
   fi
 
-  # Clean previous build artifacts.
-  $MAKE clean
-
   # Build osquery.
-  if [[ -z "$RUN_TARGET" ]]; then
-    $MAKE -j$THREADS
-  else
-    $MAKE $RUN_TARGET -j$THREADS
-  fi
+  build_target
 
   if [[ $BUILD_KERNEL = 1 ]]; then
     # Build osquery kernel (optional).
@@ -160,6 +195,10 @@ function build() {
 
     # Load osquery kernel (optional).
     $MAKE kernel-test-load
+  fi
+
+  if [[ ! -z "$RUN_DETERMINISTIC" ]]; then
+    check_deterministic
   fi
 
   if [[ $RUN_TESTS = true ]]; then

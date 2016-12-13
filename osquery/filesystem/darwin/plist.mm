@@ -45,9 +45,14 @@ static Status filterArray(id plist, const std::string& root, pt::ptree& tree);
 
 static inline std::string getValue(id value) {
   if ([value isKindOfClass:[NSString class]]) {
-    return [value UTF8String];
+    if ([value UTF8String] != nullptr) {
+      return [value UTF8String];
+    }
   } else if ([value isKindOfClass:[NSNumber class]]) {
-    return [[value stringValue] UTF8String];
+    if ([value stringValue] != nullptr &&
+        [[value stringValue] UTF8String] != nullptr) {
+      return [[value stringValue] UTF8String];
+    }
   } else if ([value isKindOfClass:[NSData class]]) {
     NSString* dataString = [value base64EncodedStringWithOptions:0];
     return [dataString UTF8String];
@@ -193,8 +198,13 @@ Status parsePlist(const fs::path& path, pt::ptree& tree) {
       [stream close];
       return Status(1, error_message);
     }
-    // Parse the plist data into a core foundation dictionary-literal.
-    status = filterPlist(plist_data, tree);
+
+    @try {
+      // Parse the plist data into a core foundation dictionary-literal.
+      status = filterPlist(plist_data, tree);
+    } @catch (NSException* exception) {
+      status = Status(1, "Plist data is corrupted");
+    }
     [stream close];
   }
   return status;

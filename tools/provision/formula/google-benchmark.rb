@@ -10,6 +10,7 @@ class GoogleBenchmark < AbstractOsqueryFormula
   bottle do
     root_url "https://osquery-packages.s3.amazonaws.com/bottles"
     cellar :any_skip_relocation
+    sha256 "b69e21940600808f50327171dd226fe8649c42ebadfaa222951c759c1366e23b" => :sierra
     sha256 "980e2adab86440ba9c3edea31cf082b1b5f7cd3a08df1f2491c4ebc1d2b7f5c9" => :el_capitan
     sha256 "11e90b22673d2ba5417557a73ed8eaf9b0688f698d16645b907a84d9ee0f0e52" => :x86_64_linux
   end
@@ -22,7 +23,7 @@ class GoogleBenchmark < AbstractOsqueryFormula
     ENV.cxx11
     ENV.append_to_cflags "-Wno-zero-length-array"
 
-    system "cmake", *std_cmake_args
+    system "cmake", *osquery_cmake_args
     system "make"
     system "make", "install"
   end

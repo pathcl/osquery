@@ -26,8 +26,8 @@ class sampleTablePlugin : public TablePlugin {
  private:
   TableColumns columns() const override {
     return {
-        std::make_tuple("foo", INTEGER_TYPE, DEFAULT),
-        std::make_tuple("bar", TEXT_TYPE, DEFAULT),
+        std::make_tuple("foo", INTEGER_TYPE, ColumnOptions::DEFAULT),
+        std::make_tuple("bar", TEXT_TYPE, ColumnOptions::DEFAULT),
     };
   }
 };
@@ -41,9 +41,10 @@ class optionsTablePlugin : public TablePlugin {
  private:
   TableColumns columns() const override {
     return {
-        std::make_tuple("id", INTEGER_TYPE, INDEX | REQUIRED),
-        std::make_tuple("username", TEXT_TYPE, OPTIMIZED),
-        std::make_tuple("name", TEXT_TYPE, DEFAULT),
+        std::make_tuple(
+            "id", INTEGER_TYPE, ColumnOptions::INDEX | ColumnOptions::REQUIRED),
+        std::make_tuple("username", TEXT_TYPE, ColumnOptions::OPTIMIZED),
+        std::make_tuple("name", TEXT_TYPE, ColumnOptions::DEFAULT),
     };
   }
 
@@ -53,15 +54,18 @@ class optionsTablePlugin : public TablePlugin {
 
 TEST_F(VirtualTableTests, test_tableplugin_options) {
   auto table = std::make_shared<optionsTablePlugin>();
-  EXPECT_EQ(INDEX | REQUIRED, std::get<2>(table->columns()[0]));
+  EXPECT_EQ(ColumnOptions::INDEX | ColumnOptions::REQUIRED,
+            std::get<2>(table->columns()[0]));
 
   PluginResponse response;
   PluginRequest request = {{"action", "columns"}};
   EXPECT_TRUE(table->call(request, response).ok());
-  EXPECT_EQ(INTEGER(INDEX | REQUIRED), response[0]["op"]);
+  auto index_required =
+      static_cast<size_t>(ColumnOptions::INDEX | ColumnOptions::REQUIRED);
+  EXPECT_EQ(INTEGER(index_required), response[0]["op"]);
 
   response = table->routeInfo();
-  EXPECT_EQ(INTEGER(INDEX | REQUIRED), response[0]["op"]);
+  EXPECT_EQ(INTEGER(index_required), response[0]["op"]);
 
   std::string expected_statement =
       "(`id` INTEGER PRIMARY KEY, `username` TEXT, `name` TEXT) WITHOUT ROWID";
@@ -72,8 +76,8 @@ class aliasesTablePlugin : public TablePlugin {
  private:
   TableColumns columns() const override {
     return {
-        std::make_tuple("username", TEXT_TYPE, DEFAULT),
-        std::make_tuple("name", TEXT_TYPE, DEFAULT),
+        std::make_tuple("username", TEXT_TYPE, ColumnOptions::DEFAULT),
+        std::make_tuple("name", TEXT_TYPE, ColumnOptions::DEFAULT),
     };
   }
 
@@ -100,20 +104,22 @@ TEST_F(VirtualTableTests, test_tableplugin_aliases) {
   PluginRequest request = {{"action", "columns"}};
   EXPECT_TRUE(table->call(request, response).ok());
 
+  auto default_option = static_cast<size_t>(ColumnOptions::DEFAULT);
   PluginResponse expected_response = {
       {{"id", "column"},
        {"name", "username"},
        {"type", "TEXT"},
-       {"op", INTEGER(DEFAULT)}},
+       {"op", INTEGER(default_option)}},
       {{"id", "column"},
        {"name", "name"},
        {"type", "TEXT"},
-       {"op", INTEGER(DEFAULT)}},
+       {"op", INTEGER(default_option)}},
       {{"alias", "aliases1"}, {"id", "alias"}},
       {{"alias", "aliases2"}, {"id", "alias"}},
       {{"id", "columnAlias"}, {"name", "name1"}, {"target", "name"}},
       {{"id", "columnAlias"}, {"name", "name2"}, {"target", "name"}},
       {{"id", "columnAlias"}, {"name", "user_name"}, {"target", "username"}},
+      {{"attributes", "0"}, {"id", "attributes"}},
   };
   EXPECT_EQ(response, expected_response);
 
@@ -174,8 +180,8 @@ class pTablePlugin : public TablePlugin {
  private:
   TableColumns columns() const override {
     return {
-        std::make_tuple("x", INTEGER_TYPE, DEFAULT),
-        std::make_tuple("y", INTEGER_TYPE, DEFAULT),
+        std::make_tuple("x", INTEGER_TYPE, ColumnOptions::DEFAULT),
+        std::make_tuple("y", INTEGER_TYPE, ColumnOptions::DEFAULT),
     };
   }
 
@@ -194,8 +200,8 @@ class kTablePlugin : public TablePlugin {
  private:
   TableColumns columns() const override {
     return {
-        std::make_tuple("x", INTEGER_TYPE, DEFAULT),
-        std::make_tuple("z", INTEGER_TYPE, DEFAULT),
+        std::make_tuple("x", INTEGER_TYPE, ColumnOptions::DEFAULT),
+        std::make_tuple("z", INTEGER_TYPE, ColumnOptions::DEFAULT),
     };
   }
 
@@ -237,10 +243,6 @@ TEST_F(VirtualTableTests, test_constraints_stacking) {
     attachTableInternal("k", k->columnDefinition(), dbc);
   }
 
-  QueryData results;
-  std::string statement;
-  std::map<std::string, std::string> expected;
-
   std::vector<std::pair<std::string, QueryData>> constraint_tests = {
       MP("select k.x from p, k", makeResult("x", {"1", "2", "1", "2"})),
       MP("select k.x from (select * from k) k2, p, k where k.x = p.x",
@@ -275,10 +277,14 @@ TEST_F(VirtualTableTests, test_constraints_stacking) {
   }
 
   std::vector<QueryData> union_results = {
-      makeResult("x", {"1", "2"}),   makeResult("k.x", {"1", "2"}),
-      makeResult("k.x", {"1", "2"}), makeResult("k.x", {"1", "2"}),
-      makeResult("k.x", {"1", "2"}), makeResult("k.x", {"1", "2"}),
-      makeResult("k.x", {"1", "2"}), makeResult("p.x", {"1"}),
+      makeResult("x", {"1", "2"}),
+      makeResult("k.x", {"1", "2"}),
+      makeResult("k.x", {"1", "2"}),
+      makeResult("k.x", {"1", "2"}),
+      makeResult("k.x", {"1", "2"}),
+      makeResult("k.x", {"1", "2"}),
+      makeResult("k.x", {"1", "2"}),
+      makeResult("p.x", {"1"}),
       makeResult("p.x", {"1"}),
   };
 
@@ -294,7 +300,7 @@ class jsonTablePlugin : public TablePlugin {
  private:
   TableColumns columns() const override {
     return {
-        std::make_tuple("data", TEXT_TYPE, DEFAULT),
+        std::make_tuple("data", TEXT_TYPE, ColumnOptions::DEFAULT),
     };
   }
 
@@ -369,7 +375,7 @@ class cacheTablePlugin : public TablePlugin {
  private:
   TableColumns columns() const override {
     return {
-        std::make_tuple("data", TEXT_TYPE, DEFAULT),
+        std::make_tuple("data", TEXT_TYPE, ColumnOptions::DEFAULT),
     };
   }
 
@@ -414,5 +420,144 @@ TEST_F(VirtualTableTests, test_table_cache) {
   queryInternal(statement, results, dbc->db());
   ASSERT_EQ(results.size(), 1U);
   ASSERT_EQ(results[0]["data"], "awesome_data");
+}
+
+class indexIOptimizedTablePlugin : public TablePlugin {
+ private:
+  TableColumns columns() const override {
+    return {
+        std::make_tuple("i", INTEGER_TYPE, ColumnOptions::INDEX),
+        std::make_tuple("j", INTEGER_TYPE, ColumnOptions::DEFAULT),
+        std::make_tuple("text", INTEGER_TYPE, ColumnOptions::DEFAULT),
+    };
+  }
+
+ public:
+  QueryData generate(QueryContext& context) override {
+    scans++;
+
+    QueryData results;
+    auto indexes = context.constraints["i"].getAll<int>(EQUALS);
+    for (const auto& i : indexes) {
+      results.push_back(
+          {{"i", INTEGER(i)}, {"j", INTEGER(i * 10)}, {"text", "none"}});
+    }
+    if (indexes.empty()) {
+      for (size_t i = 0; i < 100; i++) {
+        results.push_back(
+            {{"i", INTEGER(i)}, {"j", INTEGER(i * 10)}, {"text", "some"}});
+      }
+    }
+    return results;
+  }
+
+  // Here the goal is to expect/assume the number of scans.
+  size_t scans{0};
+};
+
+class indexJOptimizedTablePlugin : public TablePlugin {
+ private:
+  TableColumns columns() const override {
+    return {
+        std::make_tuple("j", INTEGER_TYPE, ColumnOptions::INDEX),
+        std::make_tuple("text", INTEGER_TYPE, ColumnOptions::DEFAULT),
+    };
+  }
+
+ public:
+  QueryData generate(QueryContext& context) override {
+    scans++;
+
+    QueryData results;
+    auto indexes = context.constraints["j"].getAll<int>(EQUALS);
+    for (const auto& j : indexes) {
+      results.push_back({{"j", INTEGER(j)}, {"text", "none"}});
+    }
+    if (indexes.empty()) {
+      for (size_t j = 0; j < 100; j++) {
+        results.push_back({{"j", INTEGER(j)}, {"text", "some"}});
+      }
+    }
+    return results;
+  }
+
+  // Here the goal is to expect/assume the number of scans.
+  size_t scans{0};
+};
+
+class defaultScanTablePlugin : public TablePlugin {
+ private:
+  TableColumns columns() const override {
+    return {
+        std::make_tuple("i", INTEGER_TYPE, ColumnOptions::DEFAULT),
+        std::make_tuple("text", INTEGER_TYPE, ColumnOptions::DEFAULT),
+    };
+  }
+
+ public:
+  QueryData generate(QueryContext& context) override {
+    scans++;
+
+    QueryData results;
+    for (size_t i = 0; i < 10; i++) {
+      results.push_back({{"i", INTEGER(i)}, {"text", "some"}});
+    }
+    return results;
+  }
+
+  // Here the goal is to expect/assume the number of scans.
+  size_t scans{0};
+};
+
+TEST_F(VirtualTableTests, test_indexing_costs) {
+  // Get a database connection.
+  auto dbc = SQLiteDBManager::getUnique();
+  auto table_registry = Registry::registry("table");
+
+  auto i = std::make_shared<indexIOptimizedTablePlugin>();
+  i->setName("index_i");
+  attachTableInternal("index_i", i->columnDefinition(), dbc);
+  table_registry->add(i);
+
+  auto j = std::make_shared<indexJOptimizedTablePlugin>();
+  j->setName("index_j");
+  attachTableInternal("index_j", j->columnDefinition(), dbc);
+  table_registry->add(j);
+
+  auto default_scan = std::make_shared<defaultScanTablePlugin>();
+  default_scan->setName("default_scan");
+  attachTableInternal("default_scan", default_scan->columnDefinition(), dbc);
+  table_registry->add(default_scan);
+
+  QueryData results;
+  queryInternal(
+      "SELECT * from default_scan JOIN index_i using (i);", results, dbc->db());
+  // We expect index_i to optimize, meaning the constraint evaluation
+  // understood the marked columns and returned a low cost.
+  ASSERT_EQ(1U, default_scan->scans);
+  EXPECT_EQ(10U, i->scans);
+
+  // Reset.
+  default_scan->scans = 0;
+  i->scans = 0;
+
+  // The inverse should also hold, all cost evaluations will be high.
+  queryInternal(
+      "SELECT * from index_i JOIN default_scan using (i);", results, dbc->db());
+  EXPECT_EQ(10U, i->scans);
+  EXPECT_EQ(1U, default_scan->scans);
+
+  // Reset.
+  default_scan->scans = 0;
+  i->scans = 0;
+
+  queryInternal(
+      "SELECT * from default_scan join index_i using (i) join index_j using "
+      "(j);",
+      results,
+      dbc->db());
+  ASSERT_EQ(1U, default_scan->scans);
+  EXPECT_EQ(10U, i->scans);
+  EXPECT_EQ(10U, j->scans);
 }
 }

@@ -27,7 +27,6 @@
 namespace osquery {
 
 DECLARE_string(database_path);
-DECLARE_bool(database_in_memory);
 
 class GlogRocksDBLogger : public rocksdb::Logger {
  public:
@@ -62,10 +61,14 @@ class RocksDBDatabasePlugin : public DatabasePlugin {
   Status setUp() override;
 
   /// Database workflow: close and cleanup.
-  void tearDown() override { close(); }
+  void tearDown() override {
+    close();
+  }
 
   /// Need to tear down open resources,
-  virtual ~RocksDBDatabasePlugin() { close(); }
+  virtual ~RocksDBDatabasePlugin() {
+    close();
+  }
 
  private:
   /// Obtain a close lock and release resources.
@@ -127,6 +130,11 @@ void GlogRocksDBLogger::Logv(const char* format, va_list ap) {
 
   // There is a spurious warning on first open.
   if (log_line.find("Error when reading") == std::string::npos) {
+    // Rocksdb calls are non-reentrant. Since this callback is made in the
+    // context of a rocksdb api call, turn log forwarding off to prevent the
+    // logger from trying to make a call back into rocksdb and causing a
+    // deadlock
+    LoggerForwardingDisabler forwarding_disabler;
     LOG(INFO) << "RocksDB: " << log_line;
   }
 }
@@ -138,6 +146,8 @@ Status RocksDBDatabasePlugin::setUp() {
 
   if (!initialized_) {
     initialized_ = true;
+    options_.OptimizeForSmallDb();
+
     // Set meta-data (mostly) handling options.
     options_.create_if_missing = true;
     options_.create_missing_column_families = true;
@@ -152,10 +162,11 @@ Status RocksDBDatabasePlugin::setUp() {
     options_.compaction_style = rocksdb::kCompactionStyleLevel;
     options_.arena_block_size = (4 * 1024);
     options_.write_buffer_size = (4 * 1024) * 100; // 100 blocks.
-    options_.max_write_buffer_number = 3;
+    options_.max_write_buffer_number = 4;
     options_.min_write_buffer_number_to_merge = 1;
-    options_.max_background_compactions = 2;
-    options_.max_background_flushes = 2;
+    // Before adding the OptimizeForSmallDB API call we used:
+    //   options_.max_background_compactions = 2;
+    //   options_.max_background_flushes = 2;
 
     // Create an environment to replace the default logger.
     if (logger_ == nullptr) {
@@ -175,20 +186,13 @@ Status RocksDBDatabasePlugin::setUp() {
   // Consume the current settings.
   // A configuration update may change them, but that does not affect state.
   path_ = fs::path(FLAGS_database_path).make_preferred().string();
-  in_memory_ = FLAGS_database_in_memory;
-
-  if (in_memory_) {
-    // Remove when MemEnv is included in librocksdb
-    // options_.env = rocksdb::NewMemEnv(rocksdb::Env::Default());
-    return Status(1, "Cannot start in-memory RocksDB: Requires MemEnv");
-  }
 
   if (pathExists(path_).ok() && !isReadable(path_).ok()) {
     return Status(1, "Cannot read RocksDB path: " + path_);
   }
 
   if (!DatabasePlugin::kCheckingDB) {
-    VLOG(1) << "Opening RocksDB handle: " << path_;
+    LOG(INFO) << "Opening RocksDB handle: " << path_;
   }
 
   // Tests may trash calls to setUp, make sure subsequent calls do not leak.
@@ -204,15 +208,15 @@ Status RocksDBDatabasePlugin::setUp() {
     }
 
     if (!DatabasePlugin::kCheckingDB) {
-      VLOG(1) << "Opening RocksDB failed: Continuing with read-only support";
+      LOG(INFO) << "Opening RocksDB failed: Continuing with read-only support";
     }
 #if !defined(ROCKSDB_LITE)
     // RocksDB LITE does not support readonly mode.
     // The database was readable but could not be opened, either (1) it is not
     // writable or (2) it is already opened by another process.
     // Try to open the database in a ReadOnly mode.
-    rocksdb::DB::OpenForReadOnly(options_, path_, column_families_, &handles_,
-                                 &db_);
+    rocksdb::DB::OpenForReadOnly(
+        options_, path_, column_families_, &handles_, &db_);
 #endif
     // Also disable event publishers.
     Flag::updateValue("disable_events", "true");
@@ -239,7 +243,9 @@ void RocksDBDatabasePlugin::close() {
   }
 }
 
-rocksdb::DB* RocksDBDatabasePlugin::getDB() const { return db_; }
+rocksdb::DB* RocksDBDatabasePlugin::getDB() const {
+  return db_;
+}
 
 rocksdb::ColumnFamilyHandle* RocksDBDatabasePlugin::getHandleForColumnFamily(
     const std::string& cf) const {
@@ -249,7 +255,7 @@ rocksdb::ColumnFamilyHandle* RocksDBDatabasePlugin::getHandleForColumnFamily(
         return handles_[i];
       }
     }
-  } catch (const std::exception& e) {
+  } catch (const std::exception& /* e */) {
     // pass through and return nullptr
   }
   return nullptr;

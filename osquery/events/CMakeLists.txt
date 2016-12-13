@@ -10,7 +10,7 @@ if(APPLE)
 elseif(FREEBSD)
   file(GLOB OSQUERY_EVENTS_FREEBSD "freebsd/*.cpp")
   ADD_OSQUERY_LIBRARY(FALSE osquery_events_freebsd ${OSQUERY_EVENTS_FREEBSD})
-elseif(WIN32)
+elseif(WINDOWS)
   # TODO: When we have Windows events, uncomment these
   # file(GLOB OSQUERY_EVENTS_WINDOWS "windows/*.cpp")
   # ADD_OSQUERY_LIBRARY(FALSE osquery_events_windows ${OSQUERY_EVENTS_WINDOWS})
@@ -28,12 +28,20 @@ ADD_OSQUERY_LIBRARY(TRUE osquery_events
   events.cpp
 )
 
-if(NOT WIN32)
+if(NOT WINDOWS)
   file(GLOB OSQUERY_EVENTS_TESTS "tests/*.cpp")
   ADD_OSQUERY_TEST(TRUE ${OSQUERY_EVENTS_TESTS})
 
   file(GLOB OSQUERY_EVENTS_BENCHMARKS "benchmarks/*.cpp")
-  ADD_OSQUERY_BENCHMARK(${OSQUERY_EVENTS_BENCHMARKS})
+  if (LINUX)
+    file(GLOB OSQUERY_EVENTS_PLATFORM_BENCHMARKS "linux/benchmarks/*.cpp")
+  elseif (DARWIN)
+    file(GLOB OSQUERY_EVENTS_PLATFORM_BENCHMARKS "darwin/benchmarks/*.cpp")
+  endif()
+  ADD_OSQUERY_BENCHMARK(
+    ${OSQUERY_EVENTS_BENCHMARKS}
+    ${OSQUERY_EVENTS_PLATFORM_BENCHMARKS}
+  )
 
   # Kernel-related userland code.
   file(GLOB OSQUERY_EVENTS_KERNEL "kernel/*.cpp")

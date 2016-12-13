@@ -8,11 +8,12 @@
  *
  */
 
-#include <vector>
 #include <string>
+#include <vector>
 
 #include <boost/algorithm/string/join.hpp>
 #include <boost/algorithm/string/predicate.hpp>
+#include <boost/filesystem/path.hpp>
 
 #include <osquery/core.h>
 #include <osquery/filesystem.h>
@@ -20,18 +21,27 @@
 #include <osquery/tables.h>
 
 #include "osquery/core/conversions.h"
+#include "osquery/filesystem/fileops.h"
+
+namespace fs = boost::filesystem;
 
 namespace osquery {
 namespace tables {
 
+#ifndef WIN32
+fs::path kEtcHosts = "/etc/hosts";
+#else
+fs::path kEtcHosts = (getSystemRoot() / "system32\\drivers\\etc\\hosts");
+#endif
 QueryData parseEtcHostsContent(const std::string& content) {
   QueryData results;
 
-  for (const auto& i : osquery::split(content, "\n")) {
-    auto line = split(i);
+  for (const auto& _line : osquery::split(content, "\n")) {
+    auto line = split(_line);
     if (line.size() == 0 || boost::starts_with(line[0], "#")) {
       continue;
     }
+
     Row r;
     r["address"] = line[0];
     if (line.size() > 1) {
@@ -52,8 +62,7 @@ QueryData parseEtcHostsContent(const std::string& content) {
 
 QueryData genEtcHosts(QueryContext& context) {
   std::string content;
-  auto s = readFile("/etc/hosts", content);
-  if (s.ok()) {
+  if (readFile(kEtcHosts, content).ok()) {
     return parseEtcHostsContent(content);
   } else {
     return {};

@@ -10,6 +10,49 @@
 
 #pragma once
 
+/*
+ * Our third-party version of cpp-netlib uses OpenSSL APIs.
+ * On OS X these symbols are marked deprecated and clang will warn against
+ * us including them. We are squashing the noise for OS X's OpenSSL only.
+ *
+ * This is placed here because of ordering issues. ASIO requires WinSock.h
+ * not to be already included.
+ */
+
+// clang-format off
+#ifdef WIN32
+#pragma warning(push, 3)
+
+/*
+ * Suppressing warning C4005: 
+ * 'ASIO_ERROR_CATEGORY_NOEXCEPT': macro redefinition
+ */
+#pragma warning(disable: 4005)
+
+/*
+ * Suppressing warning C4244: 
+ * 'argument': conversion from '__int64' to 'long', possible loss of data
+ */
+#pragma warning(disable: 4244)
+#else
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#pragma clang diagnostic ignored "-Wunused-local-typedef"
+#pragma clang diagnostic ignored "-W#pragma-messages"
+#endif
+
+#include <boost/network/protocol/http/client.hpp>
+
+#ifdef WIN32
+#pragma warning(pop)
+
+/// We need to reinclude this to re-enable boost's warning suppression
+#include <boost/config/compiler/visualc.hpp>
+#else
+#pragma clang diagnostic pop
+#endif
+// clang-format on
+
 #include <openssl/ssl.h>
 #include <openssl/crypto.h>
 
@@ -34,18 +77,6 @@ SSL_METHOD* SSLv3_method(void);
 void ERR_remove_state(unsigned long);
 }
 
-// Our third-party version of cpp-netlib uses OpenSSL APIs.
-// On OS X these symbols are marked deprecated and clang will warn against
-// us including them. We are squashing the noise for OS X's OpenSSL only.
-// clang-format off
-_Pragma("clang diagnostic push")
-_Pragma("clang diagnostic ignored \"-Wdeprecated-declarations\"")
-_Pragma("clang diagnostic ignored \"-Wunused-local-typedef\"")
-_Pragma("clang diagnostic ignored \"-W#pragma-messages\"")
-#include <boost/network/protocol/http/client.hpp>
-_Pragma("clang diagnostic pop")
-// clang-format on
-
 #include <osquery/flags.h>
 
 #include "osquery/remote/requests.h"
@@ -55,7 +86,8 @@ namespace osquery {
 /// Path to optional TLS client secret key, used for enrollment/requests.
 DECLARE_string(tls_client_key);
 
-/// Path to optional TLS client certificate (PEM), used for enrollment/requests.
+/// Path to optional TLS client certificate (PEM), used for
+/// enrollment/requests.
 DECLARE_string(tls_client_cert);
 
 /// TLS server hostname.
@@ -106,7 +138,9 @@ class TLSTransport : public Transport {
 
  private:
   /// Testing-only, disable peer verification.
-  void disableVerifyPeer() { verify_peer_ = false; }
+  void disableVerifyPeer() {
+    verify_peer_ = false;
+  }
 
   /// Set TLS-client authentication options.
   void setClientCertificate(const std::string& certificate_file,

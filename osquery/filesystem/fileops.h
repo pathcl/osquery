@@ -41,14 +41,10 @@ using ssize_t = SSIZE_T;
 using PlatformHandle = HANDLE;
 using PlatformTimeType = FILETIME;
 
-/**
- * Windows does not define these, X_OK on Windows just ensures that the
- * file is readable.
- */
-#define F_OK 0
+// Windows do not define these by default
 #define R_OK 4
 #define W_OK 2
-#define X_OK R_OK
+#define X_OK 1
 
 // Windows does not define these constants, and they are neater
 // than using raw octal for platformChmod, etc.
@@ -94,7 +90,8 @@ const PlatformHandle kInvalidHandle = (PlatformHandle)-1;
 #define PF_CREATE_NEW (0 << 2)
 #define PF_CREATE_ALWAYS (1 << 2)
 #define PF_OPEN_EXISTING (2 << 2)
-#define PF_TRUNCATE (3 << 2)
+#define PF_OPEN_ALWAYS (3 << 2)
+#define PF_TRUNCATE (4 << 2)
 
 #define PF_NONBLOCK 0x0020
 #define PF_APPEND 0x0040
@@ -105,10 +102,11 @@ const PlatformHandle kInvalidHandle = (PlatformHandle)-1;
  * Provides a platform agnostic enumeration for file seek operations. These
  * are translated to the appropriate flags for the underlying platform.
  */
-
 enum SeekMode { PF_SEEK_BEGIN = 0, PF_SEEK_CURRENT, PF_SEEK_END };
 
 #ifdef WIN32
+/// Takes a Windows FILETIME object and returns seconds since epoch
+LONGLONG filetimeToUnixtime(const FILETIME& ft);
 
 /**
  * @brief Stores information about the last Windows async request
@@ -164,13 +162,19 @@ class PlatformFile {
    * and hasPendingIo() is true, this indicates that the read()/write()
    * operation didn't complete on time.
    */
-  bool hasPendingIo() const { return has_pending_io_; }
+  bool hasPendingIo() const {
+    return has_pending_io_;
+  }
 
   /// Checks to see if the handle backing the PlatformFile object is valid.
-  bool isValid() const { return (handle_ != kInvalidHandle); }
+  bool isValid() const {
+    return (handle_ != kInvalidHandle);
+  }
 
   /// Returns the platform specific handle.
-  PlatformHandle nativeHandle() const { return handle_; }
+  PlatformHandle nativeHandle() const {
+    return handle_;
+  }
 
   /**
    * @brief Returns success if owner of the file is root.
@@ -190,9 +194,9 @@ class PlatformFile {
    * @brief Determines how immutable the file is to external modifications.
    * @note Currently, this is only implemented on Windows. The Windows version
    *       of this function ensures that writes are explicitly denied for the
-   *       file and the file's parent directory.
+   *       file AND the file's parent directory.
    */
-  Status isNonWritable() const;
+  Status hasSafePermissions() const;
 
   bool getFileTimes(PlatformTime& times);
 
@@ -207,6 +211,8 @@ class PlatformFile {
   size_t size() const;
 
  private:
+  fs::path fname_;
+
   PlatformHandle handle_{kInvalidHandle};
 
   bool is_nonblock_{false};
@@ -288,4 +294,40 @@ Status platformIsFileAccessible(const fs::path& path);
 
 /// Determine if the FILE object points to a tty (console, serial port, etc).
 bool platformIsatty(FILE* f);
+
+/// Opens a file and returns boost::none on error
+boost::optional<FILE*> platformFopen(const std::string& filename,
+                                     const std::string& mode);
+
+/**
+ * @brief Checks for the existence of a named pipe or UNIX socket.
+ *
+ * This method is overloaded to perform two actions. If removal is requested
+ * the success is determined based on the non-existence or successful removal
+ * of the socket path. Otherwise the result is straightforward.
+ *
+ * The removal action is only used when extensions or the extension manager
+ * is first starting.
+ *
+ * @param path The filesystem path to a UNIX socket or Windows named pipe.
+ * @param remove_socket Attempt to remove the socket if it exists.
+ *
+ * @return Success if the socket exists and removal was not requested. False
+ * if the socket exists and removal was requested (and the attempt to remove
+ * had failed).
+ */
+Status socketExists(const fs::path& path, bool remove_socket = false);
+
+/**
+* @brief Returns the OS root system directory.
+*
+* Some applications store configuration and application data inside of the
+* Windows directory. This function retrieves the path to the current
+* configurations Windows location.
+*
+* On POSIX systems this returns "/".
+*
+* @return an instance of fs::path, containing the OS root location.
+*/
+boost::filesystem::path getSystemRoot();
 }

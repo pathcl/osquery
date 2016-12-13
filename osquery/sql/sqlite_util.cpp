@@ -18,8 +18,6 @@
 
 namespace osquery {
 
-using OpReg = QueryPlanner::Opcode::Register;
-
 /// SQL provider for osquery internal/core.
 REGISTER_INTERNAL(SQLiteSQLPlugin, "sql", "sql");
 
@@ -27,6 +25,10 @@ FLAG(string,
      disable_tables,
      "Not Specified",
      "Comma-delimited list of table names to be disabled");
+
+DECLARE_string(nullvalue);
+
+using OpReg = QueryPlanner::Opcode::Register;
 
 using SQLiteDBInstanceRef = std::shared_ptr<SQLiteDBInstance>;
 
@@ -58,9 +60,9 @@ const std::map<std::string, std::string> kMemoryDBSettings = {
 };
 // clang-format on
 
-#define OpComparator(x) \
+#define OpComparator(x)                                                        \
   { x, QueryPlanner::Opcode(OpReg::P2, INTEGER_TYPE) }
-#define Arithmetic(x) \
+#define Arithmetic(x)                                                          \
   { x, QueryPlanner::Opcode(OpReg::P3, BIGINT_TYPE) }
 
 /**
@@ -133,6 +135,11 @@ Status SQLiteSQLPlugin::getQueryColumns(const std::string& q,
 SQLInternal::SQLInternal(const std::string& q) {
   auto dbc = SQLiteDBManager::get();
   status_ = queryInternal(q, results_, dbc->db());
+
+  // One of the advantages of using SQLInternal (aside from the Registry-bypass)
+  // is the ability to "deep-inspect" the table attributes and actions.
+  event_based_ = (dbc->getAttributes() & TableAttributes::EVENT_BASED) != 0;
+
   dbc->clearAffectedTables();
 }
 
@@ -193,6 +200,20 @@ void SQLiteDBInstance::init() {
 void SQLiteDBInstance::addAffectedTable(VirtualTableContent* table) {
   // An xFilter/scan was requested for this virtual table.
   affected_tables_.insert(std::make_pair(table->name, table));
+}
+
+TableAttributes SQLiteDBInstance::getAttributes() const {
+  const SQLiteDBInstance* rdbc = this;
+  if (isPrimary() && !managed_) {
+    // Similarly to clearAffectedTables, the connection may be forwarded.
+    rdbc = SQLiteDBManager::getConnection(true).get();
+  }
+
+  TableAttributes attributes = TableAttributes::NONE;
+  for (const auto& table : rdbc->affected_tables_) {
+    attributes = table.second->attributes | attributes;
+  }
+  return attributes;
 }
 
 void SQLiteDBInstance::clearAffectedTables() {
@@ -327,11 +348,16 @@ int queryDataCallback(void* argument, int argc, char* argv[], char* column[]) {
     return SQLITE_MISUSE;
   }
 
-  QueryData* qData = (QueryData*)argument;
+  auto qData = static_cast<QueryData*>(argument);
   Row r;
   for (int i = 0; i < argc; i++) {
     if (column[i] != nullptr) {
-      r[column[i]] = (argv[i] != nullptr) ? argv[i] : "";
+      if (r.count(column[i])) {
+        // Found a column name collision in the result.
+        VLOG(1) << "Detected overloaded column name " << column[i]
+                << " in query result consider using aliases";
+      }
+      r[column[i]] = (argv[i] != nullptr) ? argv[i] : FLAGS_nullvalue;
     }
   }
   (*qData).push_back(std::move(r));
@@ -355,7 +381,8 @@ Status getQueryColumnsInternal(const std::string& q,
                                sqlite3* db) {
   // Turn the query into a prepared statement
   sqlite3_stmt* stmt{nullptr};
-  auto rc = sqlite3_prepare_v2(db, q.c_str(), q.length() + 1, &stmt, nullptr);
+  auto rc = sqlite3_prepare_v2(
+      db, q.c_str(), static_cast<int>(q.length() + 1), &stmt, nullptr);
   if (rc != SQLITE_OK || stmt == nullptr) {
     if (stmt != nullptr) {
       sqlite3_finalize(stmt);
@@ -385,8 +412,8 @@ Status getQueryColumnsInternal(const std::string& q,
       col_type = "UNKNOWN";
       unknown_type = true;
     }
-    results.push_back(
-        std::make_tuple(col_name, columnTypeName(col_type), DEFAULT));
+    results.push_back(std::make_tuple(
+        col_name, columnTypeName(col_type), ColumnOptions::DEFAULT));
   }
 
   // An unknown type means we have to parse the plan and SQLite opcodes.

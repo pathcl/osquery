@@ -15,9 +15,10 @@ from __future__ import unicode_literals
 import argparse
 import json
 import os
-import signal
 import ssl
 import sys
+import thread
+import threading
 
 # Create a simple TLS/HTTP server.
 from BaseHTTPServer import BaseHTTPRequestHandler, HTTPServer
@@ -30,6 +31,10 @@ EXAMPLE_CONFIG = {
     "node_invalid": False,
 }
 
+# A 'node' variation of the TLS API uses a GET for config.
+EXAMPLE_NODE_CONFIG = EXAMPLE_CONFIG
+EXAMPLE_NODE_CONFIG["node"] = True
+
 EXAMPLE_DISTRIBUTED = {
     "queries": {
         "info": "select * from osquery_info",
@@ -37,7 +42,19 @@ EXAMPLE_DISTRIBUTED = {
     }
 }
 
-TEST_RESPONSE = {
+EXAMPLE_DISTRIBUTED_ACCELERATE = {
+    "queries": {
+        "info": "select * from osquery_info",
+    },
+    "accelerate" : "60"
+}
+
+TEST_GET_RESPONSE = {
+    "foo": "baz",
+    "config": "baz",
+}
+
+TEST_POST_RESPONSE = {
     "foo": "bar",
 }
 
@@ -54,6 +71,7 @@ ENROLL_RESPONSE = {
     "node_key": "this_is_a_node_secret"
 }
 
+RECEIVED_REQUESTS = []
 
 def debug(response):
     print("-- [DEBUG] %s" % str(response))
@@ -73,7 +91,10 @@ class RealSimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         debug("RealSimpleHandler::get %s" % self.path)
         self._set_headers()
-        self._reply(TEST_RESPONSE)
+        if self.path == '/config':
+            self.config(request, node=True)
+        else:
+            self._reply(TEST_GET_RESPONSE)
 
     def do_HEAD(self):
         debug("RealSimpleHandler::head %s" % self.path)
@@ -96,8 +117,10 @@ class RealSimpleHandler(BaseHTTPRequestHandler):
             self.distributed_read(request)
         elif self.path == '/distributed_write':
             self.distributed_write(request)
+        elif self.path == '/test_read_requests':
+            self.test_read_requests()
         else:
-            self._reply(TEST_RESPONSE)
+            self._reply(TEST_POST_RESPONSE)
 
     def enroll(self, request):
         '''A basic enrollment endpoint'''
@@ -109,12 +132,13 @@ class RealSimpleHandler(BaseHTTPRequestHandler):
         # Alternatively, each client could authenticate with a TLS client cert.
         # Then, access to the enrollment endpoint implies the required auth.
         # A generated node_key is still supplied for identification.
+        self._push_request('enroll', request)
         if ARGS.use_enroll_secret and ENROLL_SECRET != request["enroll_secret"]:
             self._reply(FAILED_ENROLL_RESPONSE)
             return
         self._reply(ENROLL_RESPONSE)
 
-    def config(self, request):
+    def config(self, request, node=False):
         '''A basic config endpoint'''
 
         # This endpoint responds with a JSON body that is the entire config
@@ -128,6 +152,7 @@ class RealSimpleHandler(BaseHTTPRequestHandler):
 
         # The osquery TLS config plugin calls the TLS enroll plugin to retrieve
         # a node_key, then submits that key alongside config/logger requests.
+        self._push_request('config', request)
         if "node_key" not in request or request["node_key"] not in NODE_KEYS:
             self._reply(FAILED_ENROLL_RESPONSE)
             return
@@ -138,6 +163,9 @@ class RealSimpleHandler(BaseHTTPRequestHandler):
         if ENROLL_RESET["count"] % ENROLL_RESET["max"] == 0:
             ENROLL_RESET["first"] = 0
             self._reply(FAILED_ENROLL_RESPONSE)
+            return
+        if node:
+            self._reply(EXAMPLE_NODE_CONFIG)
             return
         self._reply(EXAMPLE_CONFIG)
 
@@ -155,15 +183,27 @@ class RealSimpleHandler(BaseHTTPRequestHandler):
     def log(self, request):
         self._reply({})
 
+    def test_read_requests(self):
+        # call made by unit tests to retrieve the entire history of requests 
+        # made by code under test. Used by unit tests to verify that the code
+        # under test made the expected calls to the TLS backend
+        self._reply(RECEIVED_REQUESTS)
+
+    def _push_request(self, command, request):
+        # Archive the http command and the request body so that unit tests
+        # can retrieve it later for verification purposes
+        request['command'] = command
+        RECEIVED_REQUESTS.append(request)
+        
     def _reply(self, response):
         debug("Replying: %s" % (str(response)))
         self.wfile.write(json.dumps(response))
 
 
-def handler(signum, frame):
+def handler():
     print("[DEBUG] Shutting down HTTP server via timeout (%d) seconds."
           % (ARGS.timeout))
-    sys.exit(0)
+    thread.interrupt_main()
 
 if __name__ == '__main__':
     SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
@@ -228,8 +268,8 @@ if __name__ == '__main__':
             exit(1)
 
     if not ARGS.persist:
-        signal.signal(signal.SIGALRM, handler)
-        signal.alarm(ARGS.timeout)
+        timer = threading.Timer(ARGS.timeout, handler)
+        timer.start()
 
     httpd = HTTPServer(('localhost', ARGS.port), RealSimpleHandler)
     if ARGS.tls:
@@ -249,4 +289,8 @@ if __name__ == '__main__':
         debug("Starting TLS/HTTPS server on TCP port: %d" % ARGS.port)
     else:
         debug("Starting HTTP server on TCP port: %d" % ARGS.port)
-    httpd.serve_forever()
+
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        sys.exit(0)

@@ -51,6 +51,7 @@ OSQUERY_CONFIG_DST="/private/var/osquery/osquery.conf"
 OSQUERY_DB_LOCATION="/private/var/osquery/osquery.db/"
 OSQUERY_LOG_DIR="/private/var/log/osquery/"
 TLS_CERT_CHAIN_DST="/private/var/osquery/tls-server-certs.pem"
+FLAGFILE_DST="/private/var/osquery/osquery.flags"
 
 WORKING_DIR=/tmp/osquery_packaging
 INSTALL_PREFIX="$WORKING_DIR/prefix"
@@ -85,6 +86,7 @@ fi
 
 POSTINSTALL_AUTOSTART_TEXT="
 cp $LAUNCHD_DST $LD_INSTALL
+touch $FLAGFILE_DST
 launchctl load $LD_INSTALL
 "
 
@@ -204,7 +206,7 @@ function main() {
   if [[ "$TLS_CERT_CHAIN_SRC" != "" && -f "$TLS_CERT_CHAIN_SRC" ]]; then
     cp $TLS_CERT_CHAIN_SRC $INSTALL_PREFIX$TLS_CERT_CHAIN_DST
   fi
- 
+
   # Move/install pre/post install scripts within the packaging root.
   log "finalizing preinstall and postinstall scripts"
   if [ $AUTOSTART == true ]  || [ $CLEAN == true ]; then
@@ -226,6 +228,30 @@ function main() {
            --version $APP_VERSION       \
            $OUTPUT_PKG_PATH 2>&1  1>/dev/null
   log "package created at $OUTPUT_PKG_PATH"
+
+  # We optionally create an RPM equivalent.
+  FPM=$(which fpm || true)
+  RPMBUILD=$(which rpmbuild || true)
+  if [[ ! "$FPM" = "" && ! "$RPMBUILD" = "" ]]; then
+    log "creating RPM equivalent"
+
+    PACKAGE_ARCH=$(uname -m)
+    PACKAGE_ITERATION="1.darwin"
+    RPM_APP_VERSION=$(echo ${APP_VERSION}|tr '-' '_')
+    OUTPUT_RPM_PATH="$BUILD_DIR/osquery-$RPM_APP_VERSION-$PACKAGE_ITERATION.$PACKAGE_ARCH.rpm"
+    CMD="$FPM -s dir -t rpm \
+      -n osquery \
+      -v $RPM_APP_VERSION \
+      --iteration $PACKAGE_ITERATION -a $PACKAGE_ARCH \
+      -p $OUTPUT_RPM_PATH \
+      --url https://osquery.io -m osquery@osquery.io \
+      --vendor Facebook --license BSD \
+      \"$INSTALL_PREFIX/=/\""
+    eval "$CMD"
+    log "RPM package (also) created at $OUTPUT_RPM_PATH"
+  else
+    log "Skipping OS X RPM package build: Cannot find fpm and rpmbuild"
+  fi
 
   # Check if a kernel extension should be built alongside.
   if [[ -d "$KERNEL_EXTENSION_SRC" ]]; then

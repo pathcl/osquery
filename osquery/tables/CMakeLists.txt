@@ -13,12 +13,13 @@ if(APPLE)
   ADD_OSQUERY_TABLE_TEST(${OSQUERY_DARWIN_TABLES_TESTS})
 
   ADD_OSQUERY_LINK_ADDITIONAL("-framework CoreFoundation")
+  ADD_OSQUERY_LINK_ADDITIONAL("-framework CoreWLAN")
   ADD_OSQUERY_LINK_ADDITIONAL("-framework Security")
   ADD_OSQUERY_LINK_ADDITIONAL("-framework OpenDirectory")
   ADD_OSQUERY_LINK_ADDITIONAL("-framework DiskArbitration")
 
   ADD_OSQUERY_LINK_ADDITIONAL("libresolv.dylib")
-  ADD_OSQUERY_LINK_ADDITIONAL("libarchive.dylib")
+  ADD_OSQUERY_LINK_ADDITIONAL("libxar.dylib")
   ADD_OSQUERY_LINK_ADDITIONAL("magic")
   ADD_OSQUERY_LINK_ADDITIONAL("tsk")
 elseif(FREEBSD)
@@ -35,7 +36,7 @@ elseif(FREEBSD)
   ADD_OSQUERY_LINK_ADDITIONAL("kvm")
   ADD_OSQUERY_LINK_ADDITIONAL("elf")
   ADD_OSQUERY_LINK_ADDITIONAL("magic")
-elseif(WIN32)
+elseif(WINDOWS)
   # Windows specific tables
   file(GLOB OSQUERY_WINDOWS_TABLES "*/windows/*.cpp")
   ADD_OSQUERY_LIBRARY_ADDITIONAL(osquery_tables_windows
@@ -54,63 +55,75 @@ else()
   ADD_OSQUERY_TABLE_TEST(${OSQUERY_LINUX_TABLES_TESTS})
 
   if(REDHAT_BASED)
-    # TODO #2169: Linking librpm and librpmio prevents osquery from keeping
-    # a 2.13 glibc ABI. Statically linking the libraries introduces too many
-    # implicit dependencies.
-
     # CentOS specific tables
     # file(GLOB OSQUERY_REDHAT_TABLES "*/centos/*.cpp")
     # ADD_OSQUERY_LIBRARY_ADDITIONAL(osquery_tables_redhat
     #   ${OSQUERY_REDHAT_TABLES}
     # )
 
-    # ADD_OSQUERY_LINK_ADDITIONAL("librpm librpmio")
   elseif(DEBIAN_BASED)
     # Ubuntu specific tables
-    file(GLOB OSQUERY_UBUNTU_TABLES "*/ubuntu/*.cpp")
-    ADD_OSQUERY_LIBRARY_ADDITIONAL(osquery_tables_ubuntu
-      ${OSQUERY_UBUNTU_TABLES}
-    )
+    # file(GLOB OSQUERY_UBUNTU_TABLES "*/ubuntu/*.cpp")
+    # ADD_OSQUERY_LIBRARY_ADDITIONAL(osquery_tables_ubuntu
+    #   ${OSQUERY_UBUNTU_TABLES}
+    # )
 
-    set(LIBDPKG_VERSION_NUMBER "1018004")
-    add_definitions(-DLIBDPKG_VERSION=${LIBDPKG_VERSION_NUMBER})
-
-    ADD_OSQUERY_LINK_ADDITIONAL("apt-pkg dpkg lzma lz4 bz2")
   endif()
 
   ADD_OSQUERY_LINK_ADDITIONAL("libresolv.so")
   ADD_OSQUERY_LINK_ADDITIONAL("cryptsetup devmapper")
   ADD_OSQUERY_LINK_ADDITIONAL("gcrypt gpg-error")
   ADD_OSQUERY_LINK_ADDITIONAL("blkid")
-  ADD_OSQUERY_LINK_ADDITIONAL("uuid")
   ADD_OSQUERY_LINK_ADDITIONAL("ip4tc")
   ADD_OSQUERY_LINK_ADDITIONAL("magic")
   ADD_OSQUERY_LINK_ADDITIONAL("tsk")
+
+  ADD_OSQUERY_LINK_ADDITIONAL("apt-pkg dpkg lzma lz4 bz2")
+  ADD_OSQUERY_LINK_ADDITIONAL("rpm rpmio beecrypt popt db")
 endif()
 
 if(APPLE OR LINUX)
   file(GLOB OSQUERY_CROSS_EVENTS_TABLES "events/*.cpp")
+
+  ADD_OSQUERY_LINK_ADDITIONAL("augeas fa xml2")
+  if(APPLE)
+    ADD_OSQUERY_LINK_ADDITIONAL("libiconv")
+  endif()
 else()
   # TODO: When we have Windows events, fill this in
   set(OSQUERY_CROSS_EVENTS_TABLES "")
 endif()
 
 # TODO: These tables should be made Windows-compatible
-if(NOT WIN32)
-  file(GLOB OSQUERY_CROSS_APPLICATIONS_TABLES "applications/*.cpp")
-  file(GLOB OSQUERY_CROSS_NETWORKING_TABLES "networking/*.cpp")
+if(NOT WINDOWS)
+  file(GLOB OSQUERY_POSIX_NETWORKING_TABLES "networking/posix/*.cpp")
   file(GLOB OSQUERY_CROSS_FORENSIC_TABLES "forensic/*.cpp")
 
+  file(GLOB OSQUERY_POSIX_APPLICATIONS_TABLES "applications/posix/*.cpp")
   file(GLOB OSQUERY_POSIX_SYSTEM_TABLES "system/posix/*.cpp")
 
   ADD_OSQUERY_LIBRARY_ADDITIONAL(osquery_tables
-    ${OSQUERY_CROSS_APPLICATIONS_TABLES}
-    ${OSQUERY_CROSS_NETWORKING_TABLES}
+    ${OSQUERY_POSIX_APPLICATIONS_TABLES}
+    ${OSQUERY_POSIX_NETWORKING_TABLES}
     ${OSQUERY_CROSS_EVENTS_TABLES}
     ${OSQUERY_CROSS_FORENSIC_TABLES}
     ${OSQUERY_POSIX_SYSTEM_TABLES}
   )
+
+  file(GLOB OSQUERY_POSIX_TABLES_TESTS "*/posix/tests/*.cpp")
+  ADD_OSQUERY_TABLE_TEST(${OSQUERY_POSIX_TABLES_TESTS})
 endif()
+
+# No cross-platform application tables yet.
+file(GLOB OSQUERY_CROSS_APPLICATIONS_TABLES "applications/*.cpp")
+ADD_OSQUERY_LIBRARY_ADDITIONAL(osquery_tables_applications
+  ${OSQUERY_CROSS_APPLICATIONS_TABLES}
+)
+
+file(GLOB OSQUERY_CROSS_NETWORKING_TABLES "networking/*.cpp")
+ADD_OSQUERY_LIBRARY_ADDITIONAL(osquery_tables_networking
+  ${OSQUERY_CROSS_NETWORKING_TABLES}
+)
 
 file(GLOB OSQUERY_CROSS_SYSTEM_TABLES "system/*.cpp")
 ADD_OSQUERY_LIBRARY_ADDITIONAL(osquery_tables_system
@@ -120,6 +133,7 @@ ADD_OSQUERY_LIBRARY_ADDITIONAL(osquery_tables_system
 file(GLOB OSQUERY_CROSS_TABLES_TESTS "[!uo]*/tests/*/*.cpp")
 file(GLOB OSQUERY_CATEGORY_TABLE_TESTS "[!uo]*/tests/*.cpp")
 file(GLOB OSQUERY_TABLE_TESTS "tests/*.cpp")
+
 ADD_OSQUERY_TABLE_TEST(
   ${OSQUERY_CROSS_TABLES_TESTS}
   ${OSQUERY_CATEGORY_TABLE_TESTS}
@@ -131,7 +145,7 @@ ADD_OSQUERY_LIBRARY_CORE(osquery_tables_utility
   ${OSQUERY_UTILITY_TABLES}
 )
 
-if(NOT FREEBSD AND NOT WIN32)
+if(NOT FREEBSD AND NOT WINDOWS)
   file(GLOB OSQUERY_UTILS "other/*.cpp")
   ADD_OSQUERY_LIBRARY_ADDITIONAL(osquery_utils
     ${OSQUERY_UTILS}

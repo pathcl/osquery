@@ -13,15 +13,35 @@
 #include <osquery/dispatcher.h>
 #include <osquery/extensions.h>
 
+#ifdef WIN32
+#pragma warning(push, 3)
+
+/*
+ * MSVC complains that ExtensionManagerHandler inherits the call() function from
+ * ExtensionHandler via dominance. This is because ExtensionManagerHandler
+ * implements ExtensionManagerIf and ExtensionHandler who both implement
+ * ExtensionIf. ExtensionIf declares a virtual call() function that
+ * ExtensionHandler defines. This _shouldn't_ cause any issues.
+ */
+#pragma warning(disable : 4250)
+#endif
+
 // osquery is built with various versions of thrift that use different search
 // paths for their includes. Unfortunately, changing include paths is not
 // possible in every build system.
 // clang-format off
 #include CONCAT(OSQUERY_THRIFT_SERVER_LIB,/TThreadedServer.h)
 #include CONCAT(OSQUERY_THRIFT_LIB,/protocol/TBinaryProtocol.h)
+
+#ifdef WIN32
+#include CONCAT(OSQUERY_THRIFT_LIB,/transport/TPipeServer.h)
+#include CONCAT(OSQUERY_THRIFT_LIB,/transport/TPipe.h)
+#else
 #include CONCAT(OSQUERY_THRIFT_LIB,/transport/TServerSocket.h)
-#include CONCAT(OSQUERY_THRIFT_LIB,/transport/TBufferTransports.h)
 #include CONCAT(OSQUERY_THRIFT_LIB,/transport/TSocket.h)
+#endif
+
+#include CONCAT(OSQUERY_THRIFT_LIB,/transport/TBufferTransports.h)
 #include CONCAT(OSQUERY_THRIFT_LIB,/concurrency/ThreadManager.h)
 
 // Include intermediate Thrift-generated interface definitions.
@@ -39,7 +59,17 @@ using namespace apache::thrift::concurrency;
 
 /// Create easier to reference typedefs for Thrift layer implementations.
 #define SHARED_PTR_IMPL OSQUERY_THRIFT_POINTER::shared_ptr
-typedef SHARED_PTR_IMPL<TSocket> TSocketRef;
+
+#ifdef WIN32
+typedef TPipe TPlatformSocket;
+typedef TPipeServer TPlatformServerSocket;
+typedef SHARED_PTR_IMPL<TPipe> TPlatformSocketRef;
+#else
+typedef TSocket TPlatformSocket;
+typedef TServerSocket TPlatformServerSocket;
+typedef SHARED_PTR_IMPL<TSocket> TPlatformSocketRef;
+#endif
+
 typedef SHARED_PTR_IMPL<TTransport> TTransportRef;
 typedef SHARED_PTR_IMPL<TProtocol> TProtocolRef;
 
@@ -108,7 +138,7 @@ class ExtensionHandler : virtual public ExtensionIf {
 class ExtensionManagerHandler : virtual public ExtensionManagerIf,
                                 public ExtensionHandler {
  public:
-  ExtensionManagerHandler() {}
+  ExtensionManagerHandler();
 
   /// Return a list of Route UUIDs and extension metadata.
   void extensions(InternalExtensionList& _return);
@@ -300,7 +330,9 @@ class ExtensionRunner : public ExtensionRunnerCore {
   void start();
 
   /// Access the UUID provided by the ExtensionManager.
-  RouteUUID getUUID() { return uuid_; }
+  RouteUUID getUUID() {
+    return uuid_;
+  }
 
  private:
   /// The unique and transient Extension UUID assigned by the ExtensionManager.
@@ -328,14 +360,16 @@ class ExtensionManagerRunner : public ExtensionRunnerCore {
 class EXInternal {
  public:
   explicit EXInternal(const std::string& path)
-      : socket_(new TSocket(path)),
+      : socket_(new TPlatformSocket(path)),
         transport_(new TBufferedTransport(socket_)),
         protocol_(new TBinaryProtocol(transport_)) {}
 
-  virtual ~EXInternal() { transport_->close(); }
+  virtual ~EXInternal() {
+    transport_->close();
+  }
 
  protected:
-  TSocketRef socket_;
+  TPlatformSocketRef socket_;
   TTransportRef transport_;
   TProtocolRef protocol_;
 };
@@ -346,11 +380,12 @@ class EXClient : public EXInternal {
   explicit EXClient(const std::string& path)
       : EXInternal(path),
         client_(std::make_shared<extensions::ExtensionClient>(protocol_)) {
-
     (void)transport_->open();
   }
 
-  const std::shared_ptr<extensions::ExtensionClient>& get() { return client_; }
+  const std::shared_ptr<extensions::ExtensionClient>& get() {
+    return client_;
+  }
 
  private:
   std::shared_ptr<extensions::ExtensionClient> client_;
@@ -374,3 +409,7 @@ class EXManagerClient : public EXInternal {
   std::shared_ptr<extensions::ExtensionManagerClient> client_;
 };
 }
+
+#ifdef WIN32
+#pragma warning(pop)
+#endif

@@ -12,8 +12,8 @@
 #include <mutex>
 #include <random>
 
+#include <boost/algorithm/string/replace.hpp>
 #include <boost/algorithm/string/trim.hpp>
-#include <boost/property_tree/json_parser.hpp>
 
 #include <osquery/config.h>
 #include <osquery/database.h>
@@ -27,9 +27,9 @@
 #include <osquery/tables.h>
 
 #include "osquery/core/conversions.h"
+#include "osquery/core/json.h"
 
 namespace pt = boost::property_tree;
-
 
 namespace osquery {
 
@@ -72,15 +72,12 @@ DECLARE_bool(disable_events);
  * On process or worker resume an initializer or config may check if the
  * resume was the result of a failure during an executing query.
  */
-const std::string kExecutingQuery = "executing_query";
-const std::string kFailedQueries = "failed_queries";
+const std::string kExecutingQuery{"executing_query"};
+const std::string kFailedQueries{"failed_queries"};
 
 // The config may be accessed and updated asynchronously; use mutexes.
 Mutex config_hash_mutex_;
 Mutex config_valid_mutex_;
-
-using RecursiveMutex = std::recursive_mutex;
-using RecursiveLock = std::lock_guard<std::recursive_mutex>;
 
 /// Several config methods require enumeration via predicate lambdas.
 RecursiveMutex config_schedule_mutex_;
@@ -116,7 +113,9 @@ class Schedule : private boost::noncopyable {
    * next iterator element or skipped.
    */
   struct Step {
-    bool operator()(PackRef& pack) { return pack->shouldPackExecute(); }
+    bool operator()(PackRef& pack) {
+      return pack->shouldPackExecute();
+    }
   };
 
   /// Add a pack to the schedule
@@ -126,7 +125,9 @@ class Schedule : private boost::noncopyable {
   }
 
   /// Remove a pack, by name.
-  void remove(const std::string& pack) { remove(pack, ""); }
+  void remove(const std::string& pack) {
+    remove(pack, "");
+  }
 
   /// Remove a pack by name and source.
   void remove(const std::string& pack, const std::string& source) {
@@ -155,10 +156,17 @@ class Schedule : private boost::noncopyable {
   /// Boost gives us a nice template for maintaining the state of the iterator
   using iterator = boost::filter_iterator<Step, container::iterator>;
 
-  iterator begin() { return iterator(packs_.begin(), packs_.end()); }
-  iterator end() { return iterator(packs_.end(), packs_.end()); }
+  iterator begin() {
+    return iterator(packs_.begin(), packs_.end());
+  }
 
-  PackRef& last() { return packs_.back(); }
+  iterator end() {
+    return iterator(packs_.end(), packs_.end());
+  }
+
+  PackRef& last() {
+    return packs_.back();
+  }
 
  private:
   /// Underlying storage for the packs
@@ -197,8 +205,8 @@ void restoreScheduleBlacklist(std::map<std::string, size_t>& blacklist) {
   size_t current_time = getUnixTime();
   for (size_t i = 0; i < blacklist_pairs.size() / 2; i++) {
     // Fill in a mapping of query name to time the blacklist expires.
-    long int expire = 0;
-    safeStrtol(blacklist_pairs[(i * 2) + 1], 10, expire);
+    long long expire = 0;
+    safeStrtoll(blacklist_pairs[(i * 2) + 1], 10, expire);
     if (expire > 0 && current_time < (size_t)expire) {
       blacklist[blacklist_pairs[(i * 2)]] = (size_t)expire;
     }
@@ -243,14 +251,29 @@ Config::Config()
 void Config::addPack(const std::string& name,
                      const std::string& source,
                      const pt::ptree& tree) {
-  RecursiveLock wlock(config_schedule_mutex_);
-  try {
-    schedule_->add(std::make_shared<Pack>(name, source, tree));
-    if (schedule_->last()->shouldPackExecute()) {
-      applyParsers(source + FLAGS_pack_delimiter + name, tree, true);
+  auto addSinglePack = ([this, &source](const std::string pack_name,
+                                        const pt::ptree& pack_tree) {
+    RecursiveLock wlock(config_schedule_mutex_);
+    try {
+      schedule_->add(std::make_shared<Pack>(pack_name, source, pack_tree));
+      if (schedule_->last()->shouldPackExecute()) {
+        applyParsers(
+            source + FLAGS_pack_delimiter + pack_name, pack_tree, true);
+      }
+    } catch (const std::exception& e) {
+      LOG(WARNING) << "Error adding pack: " << pack_name << ": " << e.what();
     }
-  } catch (const std::exception& e) {
-    LOG(WARNING) << "Error adding pack: " << name << ": " << e.what();
+  });
+
+  if (name == "*") {
+    // This is a multi-pack, expect the config plugin to have generated a
+    // "name": {pack-content} response similar to embedded pack content
+    // within the configuration.
+    for (const auto& pack : tree) {
+      addSinglePack(pack.first, pack.second);
+    }
+  } else {
+    addSinglePack(name, tree);
   }
 }
 
@@ -320,6 +343,7 @@ Status Config::load() {
   PluginResponse response;
   auto status = Registry::call("config", {{"action", "genConfig"}}, response);
   if (!status.ok()) {
+    loaded_ = true;
     return status;
   }
 
@@ -345,16 +369,10 @@ Status Config::load() {
   return status;
 }
 
-/**
- * @brief Boost's 1.59 property tree based JSON parser does not accept comments.
- *
- * For semi-compatibility with existing configurations we will attempt to strip
- * hash and C++ style comments. It is OK for the config update to be latent
- * as it is a single event. But some configuration plugins may update running
- * configurations.
- */
-inline void stripConfigComments(std::string& json) {
+void stripConfigComments(std::string& json) {
   std::string sink;
+
+  boost::replace_all(json, "\\\n", "");
   for (auto& line : osquery::split(json, "\n")) {
     boost::trim(line);
     if (line.size() > 0 && line[0] == '#') {
@@ -386,7 +404,7 @@ Status Config::updateSource(const std::string& source,
     std::stringstream json_stream;
     json_stream << clone;
     pt::read_json(json_stream, tree);
-  } catch (const pt::json_parser::json_parser_error& e) {
+  } catch (const pt::json_parser::json_parser_error& /* e */) {
     return Status(1, "Error parsing the config JSON");
   }
 
@@ -446,12 +464,14 @@ Status Config::genPack(const std::string& name,
   }
 
   try {
+    auto clone = response[0][name];
+    stripConfigComments(clone);
     pt::ptree pack_tree;
     std::stringstream pack_stream;
-    pack_stream << response[0][name];
+    pack_stream << clone;
     pt::read_json(pack_stream, pack_tree);
     addPack(name, source, pack_tree);
-  } catch (const pt::json_parser::json_parser_error& e) {
+  } catch (const pt::json_parser::json_parser_error& /* e */) {
     LOG(WARNING) << "Error parsing the pack JSON: " << name;
   }
   return Status(0);
@@ -465,7 +485,7 @@ void Config::applyParsers(const std::string& source,
     std::shared_ptr<ConfigParserPlugin> parser = nullptr;
     try {
       parser = std::dynamic_pointer_cast<ConfigParserPlugin>(plugin.second);
-    } catch (const std::bad_cast& e) {
+    } catch (const std::bad_cast& /* e */) {
       LOG(ERROR) << "Error casting config parser plugin: " << plugin.first;
     }
     if (parser == nullptr || parser.get() == nullptr) {
@@ -579,7 +599,7 @@ void Config::purge() {
     size_t last_executed = 0;
     try {
       last_executed = boost::lexical_cast<size_t>(content);
-    } catch (const boost::bad_lexical_cast& e) {
+    } catch (const boost::bad_lexical_cast& /* e */) {
       // Erase the timestamp as is it potentially corrupt.
       deleteDatabaseValue(kPersistentSettings, "timestamp." + saved_query);
       continue;
@@ -609,7 +629,7 @@ void Config::reset() {
     std::shared_ptr<ConfigParserPlugin> parser = nullptr;
     try {
       parser = std::dynamic_pointer_cast<ConfigParserPlugin>(plugin.second);
-    } catch (const std::bad_cast& e) {
+    } catch (const std::bad_cast& /* e */) {
       continue;
     }
     if (parser == nullptr || parser.get() == nullptr) {

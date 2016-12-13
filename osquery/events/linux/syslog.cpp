@@ -25,8 +25,8 @@
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/tokenizer.hpp>
 
-#include <osquery/logger.h>
 #include <osquery/filesystem.h>
+#include <osquery/logger.h>
 
 #include "osquery/events/linux/syslog.h"
 
@@ -35,10 +35,17 @@ namespace pt = boost::property_tree;
 
 namespace osquery {
 
+FLAG(bool, enable_syslog, false, "Enable the syslog ingestion event publisher");
+
 FLAG(string,
      syslog_pipe_path,
      "/var/osquery/syslog_pipe",
      "Path to the named pipe used for forwarding rsyslog events");
+
+FLAG(uint64,
+     syslog_rate_limit,
+     100,
+     "Maximum number of logs to ingest per run (~200ms between runs)");
 
 REGISTER(SyslogEventPublisher, "event_publisher", "syslog");
 
@@ -46,15 +53,18 @@ REGISTER(SyslogEventPublisher, "event_publisher", "syslog");
 const mode_t kPipeMode = 0460;
 const std::string kPipeGroupName = "syslog";
 const char* kTimeFormat = "%Y-%m-%dT%H:%M:%S";
-const std::vector<std::string> kCsvFields = {"time",     "host", "severity",
-                                             "facility", "tag",  "message"};
-const size_t kMaxLogsPerRun = 10;
+const std::vector<std::string> kCsvFields = {
+    "time", "host", "severity", "facility", "tag", "message"};
 const size_t kErrorThreshold = 10;
 
 Status SyslogEventPublisher::setUp() {
+  if (!FLAGS_enable_syslog) {
+    return Status(1, "Publisher disabled via configuration");
+  }
+
   Status s;
   if (!pathExists(FLAGS_syslog_pipe_path)) {
-    VLOG(1) << "Pipe does not exist. Creating pipe " << FLAGS_syslog_pipe_path;
+    VLOG(1) << "Pipe does not exist: creating pipe " << FLAGS_syslog_pipe_path;
     s = createPipe(FLAGS_syslog_pipe_path);
     if (!s.ok()) {
       LOG(WARNING) << RLOG(1964)
@@ -84,7 +94,8 @@ Status SyslogEventPublisher::setUp() {
     return Status(1,
                   "Error opening pipe for reading: " + FLAGS_syslog_pipe_path);
   }
-  VLOG(1) << "Successfully opened pipe for syslog ingestion";
+  VLOG(1) << "Successfully opened pipe for syslog ingestion: "
+          << FLAGS_syslog_pipe_path;
 
   return Status(0, "OK");
 }
@@ -108,8 +119,9 @@ Status SyslogEventPublisher::createPipe(const std::string& path) {
     return Status(0, "OK");
   }
   if (chown(FLAGS_syslog_pipe_path.c_str(), -1, group->gr_gid) == -1) {
-    return Status(1, "Error in chown to group " + kPipeGroupName + ": " +
-                         std::string(strerror(errno)));
+    return Status(1,
+                  "Error in chown to group " + kPipeGroupName + ": " +
+                      std::string(strerror(errno)));
   }
   return Status(0, "OK");
 }
@@ -117,13 +129,13 @@ Status SyslogEventPublisher::createPipe(const std::string& path) {
 Status SyslogEventPublisher::lockPipe(const std::string& path) {
   lockFd_ = open(path.c_str(), O_NONBLOCK);
   if (lockFd_ == -1) {
-    return Status(1, "Error in open for locking pipe: " +
-                         std::string(strerror(errno)));
+    return Status(
+        1, "Error in open for locking pipe: " + std::string(strerror(errno)));
   }
   if (flock(lockFd_, LOCK_EX | LOCK_NB) != 0) {
     lockFd_ = -1;
-    return Status(1, "Unable to acquire pipe lock: " +
-                         std::string(strerror(errno)));
+    return Status(
+        1, "Unable to acquire pipe lock: " + std::string(strerror(errno)));
   }
   return Status(0, "OK");
 }
@@ -141,7 +153,7 @@ Status SyslogEventPublisher::run() {
   // (see InterruptableRunnable::pause()) between runs. In case something goes
   // weird and there is a huge amount of input, we limit how many logs we
   // take in per run to avoid pegging the CPU.
-  for (size_t i = 0; i < kMaxLogsPerRun; ++i) {
+  for (size_t i = 0; i < FLAGS_syslog_rate_limit; ++i) {
     if (readStream_.rdbuf()->in_avail() == 0) {
       // If there is no pending data, we have flushed everything and can wait
       // until the next time EventFactory calls run(). This also allows the
@@ -168,7 +180,9 @@ Status SyslogEventPublisher::run() {
   return Status(0, "OK");
 }
 
-void SyslogEventPublisher::tearDown() { unlockPipe(); }
+void SyslogEventPublisher::tearDown() {
+  unlockPipe();
+}
 
 Status SyslogEventPublisher::populateEventContext(const std::string& line,
                                                   SyslogEventContextRef& ec) {
@@ -178,9 +192,10 @@ Status SyslogEventPublisher::populateEventContext(const std::string& line,
     if (key == kCsvFields.end()) {
       return Status(1, "Received more fields than expected");
     }
+
     boost::trim(value);
     if (*key == "time") {
-      ec->time = parseTimeString(value);
+      ec->fields["datetime"] = value;
     } else if (*key == "tag" && !value.empty() && value.back() == ':') {
       // rsyslog sends "tag" with a trailing colon that we don't need
       ec->fields.emplace(*key, value.substr(0, value.size() - 1));
@@ -189,17 +204,12 @@ Status SyslogEventPublisher::populateEventContext(const std::string& line,
     }
     ++key;
   }
+
   if (key == kCsvFields.end()) {
     return Status(0, "OK");
   } else {
     return Status(1, "Received fewer fields than expected");
   }
-}
-
-time_t SyslogEventPublisher::parseTimeString(const std::string& time_str) {
-  struct tm s_tm;
-  strptime(time_str.c_str(), kTimeFormat, &s_tm);
-  return timegm(&s_tm);
 }
 
 bool SyslogEventPublisher::shouldFire(const SyslogSubscriptionContextRef& sc,

@@ -40,7 +40,8 @@ The most basic TLS-based server should implement 3 HTTP POST endpoints. This API
 **Enrollment** request POST body:
 ```json
 {
-  "enroll_secret": "..." // Optional.
+  "enroll_secret": "...", // Optional.
+  "host_identifier": "..." // Determined by the --host_identifier flag
 }
 ```
 
@@ -96,7 +97,7 @@ The POSTed logger data is exactly the same as logged to disk by the **filesystem
 
 **Distributed queries**
 
-As of version 1.5.3 osquery provides *beta* support for "ad-hoc" or distributed queries. The concept of running a query outside of the schedule and having results returned immediately. Distributed queries must be explicitly enabled with a [CLI flag](../installation/cli-flags.md) or option and have the explicitly-enabled distributed plugin configured.
+As of version 1.5.3 osquery provides support for "ad-hoc" or distributed queries. The concept of running a query outside of the schedule and having results returned immediately. Distributed queries must be explicitly enabled with a [CLI flag](../installation/cli-flags.md) or option and have the explicitly-enabled distributed plugin configured.
 
 **Distributed read** request POST body:
 ```json
@@ -112,7 +113,8 @@ The read request sends the enrollment **node_key** for identification. The distr
 {
   "queries": {
     "id1": "select * from osquery_info;",
-    "id2": "select * from osquery_schedule;"
+    "id2": "select * from osquery_schedule;",
+    "id3": "select * from does_not_exist;"
   },
   "node_invalid": false // Optional, return true to indicate re-enrollment.
 }
@@ -130,10 +132,19 @@ The read request sends the enrollment **node_key** for identification. The distr
     "id2": [
       {"column1": "value1", "column2": "value2"},
       {"column1": "value1", "column2": "value2"}
-    ]
+    ],
+    "id3": []
+  },
+  "statuses": {
+    "id1": 0,
+    "id2": 0,
+    "id3": 2,
   }
 }
 ```
+
+In version 2.1.2 the distributed write API added the top-level `statuses` key.
+These error codes correspond to SQLite error codes. Consider non-0 values to indicate query execution failures.
 
 **Distributed write** response POST body:
 ```json
@@ -178,6 +189,8 @@ Additionally, the osquery TLS clients use a `osquery/X.Y.Z` UserAgent, where "X.
 Heroku maintains a great project called [Windmill](https://github.com/heroku/windmill), which implements the TLS remote settings API. It includes great documentation on compatibility, configuration, authentication, and enrollment. It is also a great place to start if you are considering writing an integration to the osquery remote settings API.
 
 [Doorman](https://github.com/mwielgoszewski/doorman) is another project that implements the TLS remote settings API. Doorman uses "tags", which can be applied to nodes, packs, and queries, in order to dynamically generate configurations for a unique set or all nodes being managed. Doorman also supports the distributed read and write API, allowing an administrator to schedule ad-hoc queries to be run immediately or in the future.
+
+[Zentral](https://github.com/zentralopensource/zentral) is a Framework and Django based web server, which implements the TLS remote settings API. Zentral will dynamically generate configurations in "probes", these can contain packs and single queries. Probes process events with input filters (added, removed, "tags", etc.), optionally trigger output actions, and notifications for results returned. Scope for "probes" is available for all devices, business units, and "tagged" device groups, sharding for "probes" is available for scopes. Zentral also supports the distributed read and write API to schedule ad-hoc queries.
 
 **Remote settings testing**
 

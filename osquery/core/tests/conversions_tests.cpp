@@ -21,12 +21,6 @@
 
 #include "osquery/tests/test_util.h"
 
-#define EXPECT_WITHIN_INCLUSIVE(lower, upper, val)                     \
-  do {                                                                 \
-    EXPECT_PRED_FORMAT2(::testing::internal::CmpHelperGE, val, lower); \
-    EXPECT_PRED_FORMAT2(::testing::internal::CmpHelperLE, val, upper); \
-  } while (0)
-
 namespace osquery {
 
 DECLARE_bool(utc);
@@ -43,21 +37,6 @@ TEST_F(ConversionsTests, test_conversion) {
   std::shared_ptr<Foobar> s2 = std::make_shared<Foobar>();
   boost::shared_ptr<Foobar> b2 = std_to_boost_shared_ptr(s2);
   EXPECT_EQ(s2.get(), b2.get());
-}
-
-TEST_F(ConversionsTests, test_utc) {
-  auto utc = FLAGS_utc;
-  FLAGS_utc = false;
-  auto t1 = getUnixTime();
-  auto at1 = std::time(nullptr);
-  EXPECT_WITHIN_INCLUSIVE(t1 - 10U, t1 + 10, static_cast<size_t>(at1));
-
-  FLAGS_utc = true;
-  auto t2 = getUnixTime();
-  auto rt2 = std::time(nullptr);
-  auto at2 = std::mktime(std::gmtime(&rt2));
-  EXPECT_WITHIN_INCLUSIVE(t2 - 10, t2 + 10, static_cast<size_t>(at2));
-  FLAGS_utc = utc;
 }
 
 TEST_F(ConversionsTests, test_base64) {

@@ -10,9 +10,11 @@
 
 #include <string>
 
+#include <dlfcn.h>
 #include <stdlib.h>
 
 #include <sys/resource.h>
+#include <sys/syscall.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -22,6 +24,10 @@
 #include "osquery/core/process.h"
 
 namespace osquery {
+
+int platformGetUid() {
+  return ::getuid();
+}
 
 bool isLauncherProcessDead(PlatformProcess& launcher) {
   if (!launcher.isValid()) {
@@ -49,7 +55,40 @@ boost::optional<std::string> getEnvVar(const std::string& name) {
   return boost::none;
 }
 
-void cleanupDefunctProcesses() { ::waitpid(-1, nullptr, WNOHANG); }
+ModuleHandle platformModuleOpen(const std::string& path) {
+  return ::dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+}
 
-void setToBackgroundPriority() { setpriority(PRIO_PGRP, 0, 10); }
+void* platformModuleGetSymbol(ModuleHandle module, const std::string& symbol) {
+  return ::dlsym(module, symbol.c_str());
+}
+
+std::string platformModuleGetError() {
+  return ::dlerror();
+}
+
+bool platformModuleClose(ModuleHandle module) {
+  return (::dlclose(module) == 0);
+}
+
+void cleanupDefunctProcesses() {
+  ::waitpid(-1, nullptr, WNOHANG);
+}
+
+void setToBackgroundPriority() {
+  setpriority(PRIO_PGRP, 0, 10);
+}
+
+// Helper function to determine if thread is running with admin privilege.
+bool isUserAdmin() {
+  return getuid() == 0;
+}
+
+int platformGetPid() {
+  return (int)getpid();
+}
+
+int platformGetTid() {
+  return (int)syscall(SYS_gettid);
+}
 }

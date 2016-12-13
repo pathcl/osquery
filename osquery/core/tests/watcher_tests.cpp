@@ -87,7 +87,7 @@ TEST_F(WatcherTests, test_watcherrunner_watch) {
   // Use the cross-platform abstractions to inspect the current test process.
   auto test_process = PlatformProcess::getCurrentProcess();
   // Initialize a scoped (fake) process abstraction.
-  auto fake_test_process = FakePlatformProcess(test_process->pid());
+  auto fake_test_process = FakePlatformProcess(test_process->nativeHandle());
 
   // The ::watch method is a single iteration of worker health checking.
   // Unless the watcher has entered a shutdown phase, every iteration should
@@ -109,7 +109,7 @@ TEST_F(WatcherTests, test_watcherrunner_stop) {
   MockWatcherRunner runner(0, nullptr, false);
 
   auto test_process = PlatformProcess::getCurrentProcess();
-  auto fake_test_process = FakePlatformProcess(test_process->pid());
+  auto fake_test_process = FakePlatformProcess(test_process->nativeHandle());
 
   EXPECT_CALL(runner, isChildSane(_)).Times(0);
   EXPECT_CALL(runner, stopChild(_)).Times(0);
@@ -196,10 +196,14 @@ class FakeWatcherRunner : public WatcherRunner {
   *
   * Internal calls to getProcessRow will return this structure.
   */
-  void setProcessRow(QueryData qd) { qd_ = std::move(qd); }
+  void setProcessRow(QueryData qd) {
+    qd_ = std::move(qd);
+  }
 
   /// The tests do not have access to the processes table.
-  QueryData getProcessRow(pid_t pid) const override { return qd_; }
+  QueryData getProcessRow(pid_t pid) const override {
+    return qd_;
+  }
 
  private:
   QueryData qd_;
@@ -232,7 +236,7 @@ TEST_F(WatcherTests, test_watcherrunner_watcherhealth) {
   EXPECT_EQ(100U, state.initial_footprint);
 
   // The measurement of latency applies an interval value normalization.
-  auto iv = std::max(getWorkerLimit(INTERVAL), (size_t)1);
+  auto iv = std::max(getWorkerLimit(WatchdogLimitType::INTERVAL), (size_t)1);
   EXPECT_EQ(100U / iv, state.user_time);
   EXPECT_EQ(0U, state.sustained_latency);
 

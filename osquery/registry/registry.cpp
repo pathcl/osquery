@@ -15,19 +15,52 @@
 #include <dlfcn.h>
 #endif
 
-#include <boost/property_tree/json_parser.hpp>
-
 #include <osquery/extensions.h>
 #include <osquery/logger.h>
 #include <osquery/registry.h>
 
 #include "osquery/core/conversions.h"
+#include "osquery/core/json.h"
 
 namespace pt = boost::property_tree;
 
 namespace osquery {
 
 HIDDEN_FLAG(bool, registry_exceptions, false, "Allow plugin exceptions");
+
+using InitializerMap = std::map<std::string, InitializerInterface*>;
+
+InitializerMap& registry_initializer() {
+  static InitializerMap registry_;
+  return registry_;
+}
+
+InitializerMap& plugin_initializer() {
+  static InitializerMap plugin_;
+  return plugin_;
+}
+
+void registerRegistry(InitializerInterface* const item) {
+  if (item != nullptr) {
+    registry_initializer().insert({item->id(), item});
+  }
+}
+
+void registerPlugin(InitializerInterface* const item) {
+  if (item != nullptr) {
+    plugin_initializer().insert({item->id(), item});
+  }
+}
+
+void registryAndPluginInit() {
+  for (const auto& it : registry_initializer()) {
+    it.second->run();
+  }
+
+  for (const auto& it : plugin_initializer()) {
+    it.second->run();
+  }
+}
 
 void RegistryHelperCore::remove(const std::string& item_name) {
   if (items_.count(item_name) > 0) {
@@ -81,7 +114,9 @@ Status RegistryHelperCore::setActive(const std::string& item_name) {
   return status;
 }
 
-const std::string& RegistryHelperCore::getActive() const { return active_; }
+const std::string& RegistryHelperCore::getActive() const {
+  return active_;
+}
 
 RegistryRoutes RegistryHelperCore::getRoutes() const {
   RegistryRoutes route_table;
@@ -257,10 +292,14 @@ std::vector<std::string> RegistryHelperCore::names() const {
 }
 
 /// Facility method to count the number of items in this registry.
-size_t RegistryHelperCore::count() const { return items_.size(); }
+size_t RegistryHelperCore::count() const {
+  return items_.size();
+}
 
 /// Allow the registry to introspect into the registered name (for logging).
-void RegistryHelperCore::setName(const std::string& name) { name_ = name; }
+void RegistryHelperCore::setName(const std::string& name) {
+  name_ = name;
+}
 
 const std::map<std::string, PluginRegistryHelperRef>& RegistryFactory::all() {
   return instance().registries_;
@@ -443,6 +482,7 @@ Status RegistryFactory::callTable(const std::string& table_name,
 
 Status RegistryFactory::setActive(const std::string& registry_name,
                                   const std::string& item_name) {
+  WriteLock lock(instance().mutex_);
   return registry(registry_name)->setActive(item_name);
 }
 
@@ -495,7 +535,9 @@ std::vector<RouteUUID> RegistryFactory::routeUUIDs() {
   return uuids;
 }
 
-size_t RegistryFactory::count() { return instance().registries_.size(); }
+size_t RegistryFactory::count() {
+  return instance().registries_.size();
+}
 
 size_t RegistryFactory::count(const std::string& registry_name) {
   if (instance().registries_.count(registry_name) == 0) {
@@ -508,7 +550,9 @@ const std::map<RouteUUID, ModuleInfo>& RegistryFactory::getModules() {
   return instance().modules_;
 }
 
-RouteUUID RegistryFactory::getModule() { return instance().module_uuid_; }
+RouteUUID RegistryFactory::getModule() {
+  return instance().module_uuid_;
+}
 
 bool RegistryFactory::usingModule() {
   // Check if the registry is allowing a module's registrations.
@@ -542,16 +586,15 @@ void RegistryFactory::declareModule(const std::string& name,
 
 RegistryModuleLoader::RegistryModuleLoader(const std::string& path)
     : handle_(nullptr), path_(path) {
-#ifndef WIN32
   // Tell the registry that we are attempting to construct a module.
   // Locking the registry prevents the module's global initialization from
   // adding or creating registry items.
   RegistryFactory::initModule(path_);
 
-  handle_ = dlopen(path_.c_str(), RTLD_NOW | RTLD_LOCAL);
+  handle_ = platformModuleOpen(path_);
   if (handle_ == nullptr) {
     VLOG(1) << "Failed to load module: " << path_;
-    VLOG(1) << dlerror();
+    VLOG(1) << platformModuleGetError();
     return;
   }
 
@@ -560,14 +603,12 @@ RegistryModuleLoader::RegistryModuleLoader(const std::string& path)
   // the SDK's CREATE_MODULE macro, which adds the global-scope constructor.
   if (RegistryFactory::locked()) {
     VLOG(1) << "Failed to declare module: " << path_;
-    dlclose(handle_);
+    platformModuleClose(handle_);
     handle_ = nullptr;
   }
-#endif
 }
 
 void RegistryModuleLoader::init() {
-#ifndef WIN32
   if (handle_ == nullptr || RegistryFactory::locked()) {
     handle_ = nullptr;
     return;
@@ -576,17 +617,17 @@ void RegistryModuleLoader::init() {
   // Locate a well-known symbol in the module.
   // This symbol name is protected against rewriting when the module uses the
   // SDK's CREATE_MODULE macro.
-  auto initializer = (ModuleInitalizer)dlsym(handle_, "initModule");
+  auto initializer =
+      (ModuleInitalizer)platformModuleGetSymbol(handle_, "initModule");
   if (initializer != nullptr) {
     initializer();
     VLOG(1) << "Initialized module: " << path_;
   } else {
     VLOG(1) << "Failed to initialize module: " << path_;
-    VLOG(1) << dlerror();
-    dlclose(handle_);
+    VLOG(1) << platformModuleGetError();
+    platformModuleClose(handle_);
     handle_ = nullptr;
   }
-#endif
 }
 
 RegistryModuleLoader::~RegistryModuleLoader() {
@@ -623,7 +664,7 @@ void Plugin::setResponse(const std::string& key,
   std::ostringstream output;
   try {
     boost::property_tree::write_json(output, tree, false);
-  } catch (const pt::json_parser::json_parser_error& e) {
+  } catch (const pt::json_parser::json_parser_error& /* e */) {
     // The plugin response could not be serialized.
   }
   response.push_back({{key, output.str()}});

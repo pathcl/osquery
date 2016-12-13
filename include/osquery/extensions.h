@@ -22,7 +22,7 @@ DECLARE_string(extensions_timeout);
 DECLARE_bool(disable_extensions);
 
 /// A millisecond internal applied to extension initialization.
-extern const size_t kExtensionInitializeLatencyUS;
+extern const size_t kExtensionInitializeLatency;
 
 /**
  * @brief Helper struct for managing extenion metadata.
@@ -52,11 +52,12 @@ Status getQueryColumnsExternal(const std::string& q, TableColumns& columns);
 /// External (extensions) SQL implementation plugin provider for "sql" registry.
 class ExternalSQLPlugin : SQLPlugin {
  public:
-  Status query(const std::string& q, QueryData& results) const {
+  Status query(const std::string& q, QueryData& results) const override {
     return queryExternal(q, results);
   }
 
-  Status getQueryColumns(const std::string& q, TableColumns& columns) const {
+  Status getQueryColumns(const std::string& q,
+                         TableColumns& columns) const override {
     return getQueryColumnsExternal(q, columns);
   }
 };
@@ -70,6 +71,18 @@ Status getExtensions(const std::string& manager_path,
 
 /// Ping an extension manager or extension.
 Status pingExtension(const std::string& path);
+
+/**
+ * @brief Perform an action while waiting for an the extension timeout.
+ *
+ * We define a 'global' extension timeout using CLI flags.
+ * There are several locations where code may act assuming an extension has
+ * loaded or broadcasted a registry.
+ *
+ * @param predicate return true or set stop to end the timeout loop.
+ * @return the last status from the predicate.
+ */
+Status applyExtensionDelay(std::function<Status(bool& stop)> predicate);
 
 /**
  * @brief Request the extensions API to autoload any appropriate extensions.

@@ -8,7 +8,7 @@
  *
  */
 
-#include <osquery/tables/applications/browser_utils.h>
+#include "osquery/tables/applications/browser_utils.h"
 
 namespace fs = boost::filesystem;
 namespace pt = boost::property_tree;
@@ -16,16 +16,23 @@ namespace pt = boost::property_tree;
 namespace osquery {
 namespace tables {
 
-/// Each home directory will include custom extensions.
-#ifdef __APPLE__
-#define kChromePath "/Library/Application Support/Google/Chrome/%/"
-#else
-#define kChromePath "/.config/google-chrome/%/"
+#ifdef WIN32
+#pragma warning(disable : 4503)
 #endif
-#define kChromeExtensionsPath "Extensions/"
 
 QueryData genChromeExtensions(QueryContext& context) {
-  return genChromeBasedExtensions(context, (kChromePath kChromeExtensionsPath));
+  fs::path chromePath;
+
+  /// Each home directory will include custom extensions.
+  if (isPlatform(PlatformType::TYPE_WINDOWS)) {
+    chromePath = "\\AppData\\Local\\Google\\Chrome\\User Data\\%\\Extensions\\";
+  } else if (isPlatform(PlatformType::TYPE_OSX)) {
+    chromePath = "/Library/Application Support/Google/Chrome/%/Extensions/";
+  } else {
+    chromePath = "/.config/google-chrome/%/Extensions/";
+  }
+
+  return genChromeBasedExtensions(context, chromePath);
 }
 }
 }

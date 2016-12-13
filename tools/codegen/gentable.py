@@ -87,6 +87,14 @@ NON_CACHEABLE = [
     "OPTIMIZED",
 ]
 
+TABLE_ATTRIBUTES = {
+    "event_subscriber": "EVENT_BASED",
+    "user_data": "USER_BASED",
+    "cacheable": "CACHEABLE",
+    "utility": "UTILITY",
+    "kernel_required": "KERNEL_REQUIRED",
+}
+
 
 def to_camel_case(snake_case):
     """ convert a snake_case string to camelCase """
@@ -178,6 +186,7 @@ class TableState(Singleton):
         self.attributes = {}
         self.examples = []
         self.aliases = []
+        self.fuzz_paths = []
         self.has_options = False
         self.has_column_aliases = False
 
@@ -198,7 +207,7 @@ class TableState(Singleton):
             for option in column.options:
                 # Only allow explicitly-defined options.
                 if option in COLUMN_OPTIONS:
-                    column_options.append(COLUMN_OPTIONS[option])
+                    column_options.append("ColumnOptions::" + COLUMN_OPTIONS[option])
                     all_options.append(COLUMN_OPTIONS[option])
             column.options_set = " | ".join(column_options)
             if len(column.aliases) > 0:
@@ -246,6 +255,7 @@ class TableState(Singleton):
             aliases=self.aliases,
             has_options=self.has_options,
             has_column_aliases=self.has_column_aliases,
+            attribute_set=[TABLE_ATTRIBUTES[attr] for attr in self.attributes],
         )
 
         with open(path, "w+") as file_h:
@@ -329,6 +339,10 @@ def examples(example_queries):
 def attributes(**kwargs):
     for attr in kwargs:
         table.attributes[attr] = kwargs[attr]
+
+
+def fuzz_paths(paths):
+    table.fuzz_paths = paths
 
 
 def implementation(impl_string):

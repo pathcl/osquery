@@ -10,8 +10,9 @@
 
 #include <osquery/config.h>
 #include <osquery/core.h>
-#include <osquery/extensions.h>
 #include <osquery/events.h>
+#include <osquery/extensions.h>
+#include <osquery/filesystem.h>
 #include <osquery/flags.h>
 #include <osquery/logger.h>
 #include <osquery/packs.h>
@@ -19,7 +20,6 @@
 #include <osquery/sql.h>
 #include <osquery/system.h>
 #include <osquery/tables.h>
-#include <osquery/filesystem.h>
 
 #include "osquery/core/process.h"
 
@@ -44,12 +44,12 @@ QueryData genOsqueryEvents(QueryContext& context) {
     if (pubref != nullptr) {
       r["subscriptions"] = INTEGER(pubref->numSubscriptions());
       r["events"] = INTEGER(pubref->numEvents());
-      r["restarts"] = INTEGER(pubref->restartCount());
+      r["refreshes"] = INTEGER(pubref->restartCount());
       r["active"] = (pubref->hasStarted() && !pubref->isEnding()) ? "1" : "0";
     } else {
       r["subscriptions"] = "0";
       r["events"] = "0";
-      r["restarts"] = "0";
+      r["refreshes"] = "0";
       r["active"] = "-1";
     }
     results.push_back(r);
@@ -61,7 +61,7 @@ QueryData genOsqueryEvents(QueryContext& context) {
     r["name"] = subscriber;
     r["type"] = "subscriber";
     // Subscribers will never 'restart'.
-    r["restarts"] = "0";
+    r["refreshes"] = "0";
 
     auto subref = EventFactory::getEventSubscriber(subscriber);
     if (subref != nullptr) {
@@ -70,7 +70,7 @@ QueryData genOsqueryEvents(QueryContext& context) {
       r["events"] = INTEGER(subref->numEvents());
 
       // Subscribers are always active, even if their publisher is not.
-      r["active"] = (subref->state() == SUBSCRIBER_RUNNING) ? "1" : "0";
+      r["active"] = (subref->state() == EventState::EVENT_RUNNING) ? "1" : "0";
     } else {
       r["subscriptions"] = "0";
       r["events"] = "0";
@@ -91,6 +91,7 @@ QueryData genOsqueryPacks(QueryContext& context) {
     r["version"] = pack->getVersion();
     r["platform"] = pack->getPlatform();
     r["shard"] = INTEGER(pack->getShard());
+    r["active"] = INTEGER(pack->isActive() ? 1 : 0);
 
     auto stats = pack->getStats();
     r["discovery_cache_hits"] = INTEGER(stats.hits);
@@ -179,7 +180,7 @@ QueryData genOsqueryExtensions(QueryContext& context) {
   if (getExtensions(extensions).ok()) {
     for (const auto& extension : extensions) {
       Row r;
-      r["uuid"] = TEXT(extension.first);
+      r["uuid"] = SQL_TEXT(extension.first);
       r["name"] = extension.second.name;
       r["version"] = extension.second.version;
       r["sdk_version"] = extension.second.sdk_version;
@@ -192,7 +193,7 @@ QueryData genOsqueryExtensions(QueryContext& context) {
   const auto& modules = RegistryFactory::getModules();
   for (const auto& module : modules) {
     Row r;
-    r["uuid"] = TEXT(module.first);
+    r["uuid"] = SQL_TEXT(module.first);
     r["name"] = module.second.name;
     r["version"] = module.second.version;
     r["sdk_version"] = module.second.sdk_version;
@@ -222,6 +223,8 @@ QueryData genOsqueryInfo(QueryContext& context) {
   r["start_time"] = INTEGER(Config::getInstance().getStartTime());
   if (Initializer::isWorker()) {
     r["watcher"] = INTEGER(PlatformProcess::getLauncherProcess()->pid());
+  } else {
+    r["watcher"] = "-1";
   }
 
   results.push_back(r);
@@ -234,8 +237,8 @@ QueryData genOsquerySchedule(QueryContext& context) {
   Config::getInstance().scheduledQueries(
       [&results](const std::string& name, const ScheduledQuery& query) {
         Row r;
-        r["name"] = TEXT(name);
-        r["query"] = TEXT(query.query);
+        r["name"] = SQL_TEXT(name);
+        r["query"] = SQL_TEXT(query.query);
         r["interval"] = INTEGER(query.interval);
         // Set default (0) values for each query if it has not yet executed.
         r["executions"] = "0";
@@ -248,8 +251,7 @@ QueryData genOsquerySchedule(QueryContext& context) {
 
         // Report optional performance information.
         Config::getInstance().getPerformanceStats(
-            name,
-            [&r](const QueryPerformance& perf) {
+            name, [&r](const QueryPerformance& perf) {
               r["executions"] = BIGINT(perf.executions);
               r["last_executed"] = BIGINT(perf.last_executed);
               r["output_size"] = BIGINT(perf.output_size);

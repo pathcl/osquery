@@ -15,6 +15,7 @@
 
 #ifdef WIN32
 #define GLOG_NO_ABBREVIATED_SEVERITIES
+#define GOOGLE_GLOG_DLL_DECL
 #endif
 
 #include <glog/logging.h>
@@ -135,7 +136,9 @@ class LoggerPlugin : public Plugin {
    *
    * @return false if this logger plugin should NOT handle Glog statuses.
    */
-  virtual bool usesLogStatus() { return false; }
+  virtual bool usesLogStatus() {
+    return false;
+  }
 
   /**
    * @brief A feature method to decide if events should be forwarded.
@@ -144,7 +147,23 @@ class LoggerPlugin : public Plugin {
    *
    * @return false if this logger plugin should NOT handle events directly.
    */
-  virtual bool usesLogEvent() { return false; }
+  virtual bool usesLogEvent() {
+    return false;
+  }
+
+  /**
+   * @brief Set the process name.
+   */
+  void setName(const std::string& name) {
+    name_ = name;
+  }
+
+  /**
+   * @brief Get the process name.
+   */
+  const std::string& name() const {
+    return name_;
+  }
 
  protected:
   /** @brief Virtual method which should implement custom logging.
@@ -198,7 +217,9 @@ class LoggerPlugin : public Plugin {
    * @param s A special log item will complete results from a query.
    * @return log status
    */
-  virtual Status logSnapshot(const std::string& s) { return logString(s); }
+  virtual Status logSnapshot(const std::string& s) {
+    return logString(s);
+  }
 
   /**
    * @brief Optionally handle each published event via the logger.
@@ -209,6 +230,9 @@ class LoggerPlugin : public Plugin {
   virtual Status logEvent(const std::string& s) {
     return Status(1, "Not enabled");
   }
+
+ private:
+  std::string name_;
 };
 
 /// Set the verbose mode, changes Glog's sinking logic and will affect plugins.
@@ -231,9 +255,8 @@ void initStatusLogger(const std::string& name);
  * logs must be forwarded to the core.
  *
  * @param name The process name.
- * @param forward_all Override the LoggerPlugin::init forwarding decision.
  */
-void initLogger(const std::string& name, bool forward_all = false);
+void initLogger(const std::string& name);
 
 /**
  * @brief Log a string using the default logger receiver.
@@ -291,6 +314,31 @@ Status logQueryLogItem(const QueryLogItem& item, const std::string& receiver);
  * @return Status indicating the success or failure of the operation
  */
 Status logSnapshotQuery(const QueryLogItem& item);
+
+/**
+ * @brief Helper class to disable logger forwarding
+ *
+ * Sometimes, it is useful to turn off log forwarding and force status logs to
+ * be buffered. One example is with handling of rocksdb status logs; if those
+ * status logs are forwarded, it can cause a deadlock inside rocksdb, if the
+ * logger plugin tries to call back into rocksdb.
+ *
+ * Creating an object of this class allows one to halt log forwarding and
+ * leave the log sink in a locked/non-forwarding state. Any log requests in this
+ * * state are guaranteed to be buffered. Callback loops can thus be avoided.
+ *
+ * The logger forwarding state is restored and unlocked as soon as the object
+ * of this class goes out of scope.
+ */
+class LoggerForwardingDisabler {
+ public:
+  LoggerForwardingDisabler();
+  ~LoggerForwardingDisabler();
+
+ private:
+  /// Value of the
+  bool forward_state_;
+};
 
 /**
  * @brief Sink a set of buffered status logs.
