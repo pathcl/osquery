@@ -25,11 +25,13 @@
 # Build Artifacts
 .provision
 build/
+*.bottle.tar.gz
 
 # Run Artifacts
 *.log
 *.orig
 *.patch
+*.rej
 
 # Vagrant Artifacts
 .vagrant
@@ -56,3 +58,7 @@ doxygen/latex
 *~
 \#*\#
 *.swp
+
+# Ignored components
+/external/*
+!/external/CMakeLists.txt

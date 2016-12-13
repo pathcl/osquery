@@ -10,6 +10,7 @@
 
 #include <glob.h>
 #include <pwd.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 
@@ -17,8 +18,9 @@
 #include <sys/time.h>
 #include <sys/types.h>
 
-#include <boost/filesystem.hpp>
 #include <boost/optional.hpp>
+
+#include <osquery/filesystem.h>
 
 #include "osquery/core/process.h"
 #include "osquery/filesystem/fileops.h"
@@ -43,7 +45,7 @@ PlatformFile::PlatformFile(const std::string& path, int mode, int perms) {
 
   switch (PF_GET_OPTIONS(mode)) {
   case PF_GET_OPTIONS(PF_CREATE_ALWAYS):
-    oflag |= O_CREAT;
+    oflag |= O_CREAT | O_TRUNC;
     may_create = true;
     break;
   case PF_GET_OPTIONS(PF_CREATE_NEW):
@@ -52,6 +54,10 @@ PlatformFile::PlatformFile(const std::string& path, int mode, int perms) {
     break;
   case PF_GET_OPTIONS(PF_OPEN_EXISTING):
     check_existence = true;
+    break;
+  case PF_GET_OPTIONS(PF_OPEN_ALWAYS):
+    oflag |= O_CREAT;
+    may_create = true;
     break;
   case PF_GET_OPTIONS(PF_TRUNCATE):
     if (mode & PF_WRITE) {
@@ -92,7 +98,9 @@ PlatformFile::~PlatformFile() {
   }
 }
 
-bool PlatformFile::isSpecialFile() const { return (size() == 0); }
+bool PlatformFile::isSpecialFile() const {
+  return (size() == 0);
+}
 
 static uid_t getFileOwner(PlatformHandle handle) {
   struct stat file;
@@ -148,7 +156,7 @@ Status PlatformFile::isExecutable() const {
   return Status(1, "Not executable");
 }
 
-Status PlatformFile::isNonWritable() const {
+Status PlatformFile::hasSafePermissions() const {
   struct stat file;
   if (::fstat(handle_, &file) < 0) {
     return Status(-1, "fstat error");
@@ -198,11 +206,15 @@ ssize_t PlatformFile::read(void* buf, size_t nbyte) {
   }
 
   has_pending_io_ = false;
-
   auto ret = ::read(handle_, buf, nbyte);
   if (ret < 0 && errno == EAGAIN) {
     has_pending_io_ = true;
+  } else if (ret > 0 && static_cast<size_t>(ret) < nbyte) {
+    // This handles a (bug?) in Linux where special files are labeled as normal
+    // for example: /sys nodes that must be read in pages.
+    has_pending_io_ = true;
   }
+
   return ret;
 }
 
@@ -212,7 +224,6 @@ ssize_t PlatformFile::write(const void* buf, size_t nbyte) {
   }
 
   has_pending_io_ = false;
-
   auto ret = ::write(handle_, buf, nbyte);
   if (ret < 0 && errno == EAGAIN) {
     has_pending_io_ = true;
@@ -256,8 +267,13 @@ boost::optional<std::string> getHomeDirectory() {
   auto user = ::getpwuid(getuid());
   auto homedir = getEnvVar("HOME");
   if (homedir.is_initialized()) {
-    return homedir;
-  } else if (user != nullptr && user->pw_dir != nullptr) {
+    // Fail over to the users home directory if HOME is not writable.
+    if (isWritable(*homedir)) {
+      return homedir;
+    }
+  }
+
+  if (user != nullptr && user->pw_dir != nullptr) {
     return std::string(user->pw_dir);
   } else {
     return boost::none;
@@ -310,5 +326,45 @@ Status platformIsFileAccessible(const fs::path& path) {
   return Status(0, "OK");
 }
 
-bool platformIsatty(FILE* f) { return 0 != isatty(fileno(f)); }
+bool platformIsatty(FILE* f) {
+  return 0 != isatty(fileno(f));
+}
+
+boost::optional<FILE*> platformFopen(const std::string& filename,
+                                     const std::string& mode) {
+  auto fp = ::fopen(filename.c_str(), mode.c_str());
+  if (fp == nullptr) {
+    return boost::none;
+  }
+
+  return fp;
+}
+
+Status socketExists(const fs::path& path, bool remove_socket) {
+  // This implies that the socket is writable.
+  if (pathExists(path).ok()) {
+    if (!isWritable(path).ok()) {
+      return Status(1, "Cannot write extension socket: " + path.string());
+    } else if (remove_socket && !osquery::remove(path).ok()) {
+      return Status(1, "Cannot remove extension socket: " + path.string());
+    }
+  } else {
+    // The path does not exist.
+    if (!pathExists(path.parent_path()).ok()) {
+      return Status(1, "Extension socket directory missing: " + path.string());
+    } else if (!isWritable(path.parent_path()).ok()) {
+      return Status(1, "Cannot create extension socket: " + path.string());
+    }
+
+    // If we are not requesting to remove the socket then this is a failure.
+    if (!remove_socket) {
+      return Status(1, "Socket does not exist");
+    }
+  }
+  return Status(0);
+}
+
+fs::path getSystemRoot() {
+  return fs::path("/");
+}
 }

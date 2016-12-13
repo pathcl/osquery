@@ -16,7 +16,6 @@
 #include <vector>
 #include <sstream>
 
-#include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 
 #include <osquery/distributed.h>
@@ -24,7 +23,7 @@
 #include <osquery/flags.h>
 #include <osquery/registry.h>
 
-#include "osquery/remote/requests.h"
+#include "osquery/core/json.h"
 #include "osquery/remote/serializers/json.h"
 #include "osquery/remote/utility.h"
 
@@ -51,9 +50,11 @@ FLAG(uint64,
 
 class TLSDistributedPlugin : public DistributedPlugin {
  public:
-  Status setUp();
-  Status getQueries(std::string& json);
-  Status writeResults(const std::string& json);
+  Status setUp() override;
+
+  Status getQueries(std::string& json) override;
+
+  Status writeResults(const std::string& json) override;
 
  protected:
   std::string read_uri_;
@@ -69,14 +70,10 @@ Status TLSDistributedPlugin::setUp() {
 }
 
 Status TLSDistributedPlugin::getQueries(std::string& json) {
-  if (FLAGS_tls_node_api) {
-    pt::ptree params;
-    params.put("verb", "POST");
-    return TLSRequestHelper::go<JSONSerializer>(
-        read_uri_, params, json, FLAGS_distributed_tls_max_attempts);
-  }
+  pt::ptree params;
+  params.put("_verb", "POST");
   return TLSRequestHelper::go<JSONSerializer>(
-      read_uri_, json, FLAGS_distributed_tls_max_attempts);
+      read_uri_, params, json, FLAGS_distributed_tls_max_attempts);
 }
 
 Status TLSDistributedPlugin::writeResults(const std::string& json) {
@@ -84,9 +81,6 @@ Status TLSDistributedPlugin::writeResults(const std::string& json) {
   try {
     std::stringstream ss(json);
     pt::read_json(ss, params);
-    if (FLAGS_tls_node_api) {
-      params.put("verb", "POST");
-    }
   } catch (const pt::ptree_error& e) {
     return Status(1, "Error parsing JSON: " + std::string(e.what()));
   }

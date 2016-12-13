@@ -95,6 +95,11 @@ bool INotifyEventPublisher::monitorSubscription(
 }
 
 void INotifyEventPublisher::configure() {
+  if (inotify_handle_ == -1) {
+    // This publisher has not been setup correctly.
+    return;
+  }
+
   for (auto& sub : subscriptions_) {
     // Anytime a configure is called, try to monitor all subscriptions.
     // Configure is called as a response to removing/adding subscriptions.
@@ -108,7 +113,9 @@ void INotifyEventPublisher::configure() {
 }
 
 void INotifyEventPublisher::tearDown() {
-  ::close(inotify_handle_);
+  if (inotify_handle_ > -1) {
+    ::close(inotify_handle_);
+  }
   inotify_handle_ = -1;
 }
 
@@ -205,8 +212,14 @@ INotifyEventContextRef INotifyEventPublisher::createEventContextFrom(
   // Get the pathname the watch fired on.
   {
     WriteLock lock(path_mutex_);
-    ec->path = descriptor_paths_.at(event->wd);
+    if (descriptor_paths_.find(event->wd) == descriptor_paths_.end()) {
+      // return a blank event context if we can't find the paths for the event
+      return ec;
+    } else {
+      ec->path = descriptor_paths_.at(event->wd);
+    }
   }
+
   if (event->len > 1) {
     ec->path += event->name;
   }

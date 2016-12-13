@@ -17,12 +17,6 @@
 
 #include <iostream>
 
-#ifdef WIN32
-#include <linenoise.h>
-#else
-#include <readline/readline.h>
-#endif
-
 #include <boost/algorithm/string/predicate.hpp>
 
 #include <osquery/core.h>
@@ -33,6 +27,7 @@
 #include <osquery/system.h>
 
 #include "osquery/core/process.h"
+#include "osquery/core/utils.h"
 #include "osquery/core/watcher.h"
 #include "osquery/devtools/devtools.h"
 #include "osquery/filesystem/fileops.h"
@@ -52,7 +47,7 @@ HIDDEN_FLAG(int32,
 DECLARE_bool(disable_caching);
 }
 
-int profile(int argc, char *argv[]) {
+int profile(int argc, char* argv[]) {
   std::string query;
   if (!osquery::platformIsatty(stdin)) {
     std::getline(std::cin, query);
@@ -65,7 +60,7 @@ int profile(int argc, char *argv[]) {
   }
 
   if (osquery::FLAGS_profile_delay > 0) {
-    osquery::sleepFor(osquery::FLAGS_profile_delay);
+    osquery::sleepFor(osquery::FLAGS_profile_delay * 1000);
   }
 
   // Perform some duplication from Initializer with respect to database setup.
@@ -87,78 +82,24 @@ int profile(int argc, char *argv[]) {
   }
 
   if (osquery::FLAGS_profile_delay > 0) {
-    osquery::sleepFor(osquery::FLAGS_profile_delay);
+    osquery::sleepFor(osquery::FLAGS_profile_delay * 1000);
   }
 
   return 0;
 }
 
-// readline completion expects strings to be malloced. readline will free them
-// later.
-char *copy_string(const std::string &str) {
-  char *copy = (char *)malloc(str.size() + 1);
-  if (copy == nullptr) {
-    fprintf(stderr,
-            "Memory allocation failed during shell autocompletion. Exiting!");
-    osquery::Initializer::shutdown(EXIT_FAILURE);
-  }
-  strncpy(copy, str.c_str(), str.size() + 1);
-  return copy;
-}
-
-#ifdef WIN32
-void table_completion_function(char const *prefix, linenoiseCompletions *lc) {
-  std::vector<std::string> tables = osquery::Registry::names("table");
-  size_t index = 0;
-
-  while (index < tables.size()) {
-    const std::string &table = tables.at(index);
-    ++index;
-
-    if (boost::algorithm::starts_with(table, prefix)) {
-      linenoiseAddCompletion(lc, table.c_str());
-    }
-  }
-}
-#else
-char *completion_generator(const char *text, int state) {
-  static std::vector<std::string> tables;
-  static size_t index;
-
-  if (state == 0) {
-    // new completion attempt
-    tables = osquery::Registry::names("table");
-    index = 0;
-  }
-
-  while (index < tables.size()) {
-    const std::string &table = tables.at(index);
-    ++index;
-
-    if (boost::algorithm::starts_with(table, text)) {
-      return copy_string(table);
-    }
-  }
-  return nullptr;
-}
-
-char **table_completion_function(const char *text, int start, int end) {
-  return rl_completion_matches(text, &completion_generator);
-}
-#endif
-
-int main(int argc, char *argv[]) {
+int main(int argc, char* argv[]) {
   // Parse/apply flags, start registry, load logger/config plugins.
-  osquery::Initializer runner(argc, argv, osquery::OSQUERY_TOOL_SHELL);
+  osquery::Initializer runner(argc, argv, osquery::ToolType::SHELL);
 
   // The shell will not use a worker process.
   // It will initialize a watcher thread for potential auto-loaded extensions.
   runner.initWorkerWatcher();
 
   // Check for shell-specific switches and positional arguments.
-  if (argc > 1 || !osquery::platformIsatty(stdin) || osquery::FLAGS_A.size() > 0 ||
-      osquery::FLAGS_pack.size() > 0 || osquery::FLAGS_L ||
-      osquery::FLAGS_profile > 0) {
+  if (argc > 1 || !osquery::platformIsatty(stdin) ||
+      osquery::FLAGS_A.size() > 0 || osquery::FLAGS_pack.size() > 0 ||
+      osquery::FLAGS_L || osquery::FLAGS_profile > 0) {
     // A query was set as a positional argument, via stdin, or profiling is on.
     osquery::FLAGS_disable_events = true;
     osquery::FLAGS_disable_caching = true;
@@ -167,13 +108,6 @@ int main(int argc, char *argv[]) {
       osquery::FLAGS_disable_extensions = true;
     }
   }
-
-#ifdef WIN32
-  linenoiseSetCompletionCallback(table_completion_function);
-#else
-  // Set up readline autocompletion
-  rl_attempted_completion_function = table_completion_function;
-#endif
 
   int retcode = 0;
   if (osquery::FLAGS_profile <= 0) {

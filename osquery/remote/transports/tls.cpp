@@ -8,10 +8,17 @@
  *
  */
 
+// clang-format off
+// This must be here to prevent a WinSock.h exists error
+#include "osquery/remote/transports/tls.h"
+// clang-format on
+
+#include <boost/filesystem.hpp>
+
+#include <osquery/core.h>
 #include <osquery/filesystem.h>
 
-#include "osquery/remote/transports/tls.h"
-
+namespace fs = boost::filesystem;
 namespace http = boost::network::http;
 
 namespace osquery {
@@ -80,14 +87,13 @@ void TLSTransport::decorateRequest(http::client::request& r) {
 
 http::client TLSTransport::getClient() {
   http::client::options options;
-  options.follow_redirects(true).always_verify_peer(verify_peer_).timeout(4);
+  options.follow_redirects(true).always_verify_peer(verify_peer_).timeout(16);
 
   std::string ciphers = kTLSCiphers;
-// Some Ubuntu 12.04 clients exhaust their cipher suites without SHA.
-#if defined(HAS_SSL_TXT_TLSV1_2) && !defined(UBUNTU_PRECISE) && !defined(DARWIN)
-  // Otherwise we prefer GCM and SHA256+
-  ciphers += ":!CBC:!SHA";
-#endif
+  if (!isPlatform(PlatformType::TYPE_OSX)) {
+    // Otherwise we prefer GCM and SHA256+
+    ciphers += ":!CBC:!SHA";
+  }
 
 #if defined(DEBUG)
   // Configuration may allow unsafe TLS testing if compiled as a debug target.
@@ -105,8 +111,19 @@ http::client TLSTransport::getClient() {
                    << server_certificate_file_;
     } else {
       // There is a non-default server certificate set.
+      boost::system::error_code ec;
+
+      auto status = fs::status(server_certificate_file_, ec);
       options.openssl_verify_path(server_certificate_file_);
-      options.openssl_certificate(server_certificate_file_);
+
+      // On Windows, we cannot set openssl_certificate to a directory
+      if (isPlatform(PlatformType::TYPE_WINDOWS) &&
+          status.type() != fs::regular_file) {
+        LOG(WARNING) << "Cannot set a non-regular file as a certificate: "
+                     << server_certificate_file_;
+      } else {
+        options.openssl_certificate(server_certificate_file_);
+      }
     }
   }
 
@@ -126,10 +143,8 @@ http::client TLSTransport::getClient() {
   // 'Optionally', though all TLS plugins should set a hostname, supply an SNI
   // hostname. This will reveal the requested domain.
   if (options_.count("hostname")) {
-#if BOOST_NETLIB_VERSION_MINOR >= 12
     // Boost cpp-netlib will only support SNI in versions >= 0.12
     options.openssl_sni_hostname(options_.get<std::string>("hostname"));
-#endif
   }
 
   http::client client(options);
@@ -183,8 +198,8 @@ Status TLSTransport::sendRequest(const std::string& params, bool compress) {
 
   // Allow request calls to override the default HTTP POST verb.
   HTTPVerb verb = HTTP_POST;
-  if (options_.count("verb") > 0) {
-    verb = (HTTPVerb)options_.get<int>("verb", HTTP_POST);
+  if (options_.count("_verb") > 0) {
+    verb = (HTTPVerb)options_.get<int>("_verb", HTTP_POST);
   }
 
   VLOG(1) << "TLS/HTTPS " << ((verb == HTTP_POST) ? "POST" : "PUT")

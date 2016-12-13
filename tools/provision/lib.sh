@@ -20,41 +20,58 @@ function setup_brew() {
     DUPES_COMMIT=$HOMEBREW_DUPES
   fi
 
-  # Check if DEPS directory exists.
-  DEPS="$1"
-  if [[ ! -d "$DEPS" ]]; then
-    log "the build directory: $DEPS does not exist"
-    sudo mkdir "$DEPS"
-    sudo chown $USER "$DEPS"
-  fi
-
   # Checkout new brew in local deps dir
-  FORMULA_TAP="$DEPS/Library/Taps/osquery/homebrew-osquery-local"
+  DEPS="$1"
   if [[ ! -d "$DEPS/.git" ]]; then
     log "setting up new brew in $DEPS"
     git clone $BREW_REPO "$DEPS"
-    log "installing local tap: homebrew-osquery-local"
-    mkdir -p "$DEPS/Library/Taps/osquery/"
-    ln -sf "$FORMULA_DIR" "$FORMULA_TAP"
   else
     log "checking for updates to brew"
-    #git pull
+    git pull > /dev/null
   fi
 
+  # Create a local cache directory
+  mkdir -p "$DEPS/.cache"
+
+  # Always update the location of the local tap link.
+  log "refreshing local tap: osquery-local"
+  mkdir -p "$DEPS/Library/Taps/osquery/"
+
+  FORMULA_TAP="$DEPS/Library/Taps/osquery/homebrew-osquery-local"
+  if [[ -L "$FORMULA_TAP" ]]; then
+    rm -f "$FORMULA_TAP"
+  fi
+  ln -sf "$FORMULA_DIR" "$FORMULA_TAP"
+
+  export HOMEBREW_NO_ANALYTICS_THIS_RUN=1
+  export HOMEBREW_NO_AUTO_UPDATE=1
+  export HOMEBREW_CACHE="$DEPS/.cache/"
   export HOMEBREW_MAKE_JOBS=$THREADS
   export HOMEBREW_NO_EMOJI=1
+  export HOMEBREW_BOTTLE_ARCH=core2
   export BREW="$DEPS/bin/brew"
   TAPS="$DEPS/Library/Taps/"
 
   # Grab full clone to perform a pin
-  log "installing homebrew core"
+  log "installing and updating Homebrew core"
   $BREW tap homebrew/core --full
-  (cd $TAPS/homebrew/homebrew-core && git reset --hard $CORE_COMMIT)
+  (cd $TAPS/homebrew/homebrew-core && git pull > /dev/null && \
+      git reset --hard $CORE_COMMIT)
 
   # Need dupes for upzip.
-  log "installing homebrew dupes"
+  log "installing and updating Homebrew dupes"
   $BREW tap homebrew/dupes --full
-  (cd $TAPS/homebrew/homebrew-dupes && git reset --hard $DUPES_COMMIT)
+  (cd $TAPS/homebrew/homebrew-dupes && git pull > /dev/null && \
+      git reset --hard $DUPES_COMMIT)
+
+  # Create a 'legacy' mirror.
+  if [[ -L "$DEPS/legacy" ]]; then
+    # Backwards compatibility for legacy environment.
+    rm -f "$DEPS/legacy"
+    mkdir -p "$DEPS/legacy"
+  elif [[ ! -d "$DEPS/legacy" ]]; then
+    mkdir -p "$DEPS/legacy"
+  fi
 
   # Fix for python linking.
   mkdir -p "$DEPS/lib/python2.7/site-packages"
@@ -65,7 +82,7 @@ function setup_brew() {
 #   2: parse structure
 function json_element() {
   CMD="import json,sys;obj=json.load(sys.stdin);print ${2}"
-  RESULT=`(echo "${1}" | python -c "${CMD}") 2>&1 || echo 'NAN'`
+  RESULT=`(echo "${1}" | python -c "${CMD}") 2>/dev/null || echo 'NAN'`
   echo $RESULT
 }
 
@@ -73,103 +90,155 @@ function set_deps_compilers() {
   if [[ "$1" = "gcc" ]]; then
     export CC="$DEPS/bin/gcc"
     export CXX="$DEPS/bin/g++"
-  else
+  elif [[ -f "$DEPS/bin/clang" ]]; then
     export CC="$DEPS/bin/clang"
     export CXX="$DEPS/bin/clang++"
+  else
+    unset CC
+    unset CXX
   fi
 }
 
-# brew_tool NAME
-#   This will install from brew.
-function brew_tool() {
-  TOOL=$1
-  shift
-
-  if [[ -z "$OSQUERY_BUILD_DEPS" && -z "$OSQUERY_DEPS_ONETIME" ]]; then
-    return
-  fi
-  unset OSQUERY_DEPS_ONETIME
-  export HOMEBREW_OPTIMIZATION_LEVEL=-Os
-  log "brew tool $TOOL"
-  $BREW install --force-bottle --ignore-dependencies $@ "$TOOL"
-}
-
-function core_brew_tool() {
-  export OSQUERY_DEPS_ONETIME=1
-  brew_tool $@
-}
-
-function local_brew_link() {
-  TOOL=$1
-  if [[ ! -z "$OSQUERY_BUILD_DEPS" ]]; then
-    $BREW link --force "${FORMULA_DIR}/${TOOL}.rb"
-  fi
-}
-
-function local_brew_postinstall() {
-  TOOL=$1
-  if [[ ! -z "$OSQUERY_BUILD_DEPS" ]]; then
-    $BREW postinstall "${FORMULA_DIR}/${TOOL}.rb"
+function brew_clear_cache() {
+  if [[ ! -z "$OSQUERY_CLEAR_CACHE" ]]; then
+    log "clearing dependency cache"
+    rm -rf "$DEPS/.cache/*"
   fi
 }
 
 # local_brew_package TYPE NAME [ARGS, ...]
-#   1: tool/dependency
+#   1: tool/dependency/link/upstream/upstream-link
 #   2: formula name
 #   N: arguments to install
-function local_brew_package() {
+function brew_internal() {
   TYPE="$1"
   TOOL="$2"
   shift
   shift
 
-  FORMULA="${FORMULA_DIR}/${TOOL}.rb"
+  FORMULA="$TOOL"
   INFO=`$BREW info --json=v1 "${FORMULA}"`
-  INSTALLED=$(json_element "${INFO}" 'obj[0]["linked_keg"]')
+  INSTALLED=$(json_element "${INFO}" 'obj[0]["installed"][0]["version"]')
   STABLE=$(json_element "${INFO}" 'obj[0]["versions"]["stable"]')
   REVISION=$(json_element "${INFO}" 'obj[0]["revision"]')
+  LINKED=$(json_element "${INFO}" 'obj[0]["linked_keg"]')
   if [[ ! "$REVISION" = "0" ]]; then
     STABLE="${STABLE}_${REVISION}"
   fi
 
-  # Could improve this detection logic to remove from-bottle.
-  FROM_BOTTLE=false
-
   # Add build arguments depending on requested from-source or default build.
   ARGS="$@"
-  ARGS="$ARGS --build-bottle --ignore-dependencies --env=inherit"
-  if [[ -z "$OSQUERY_BUILD_DEPS" ]]; then
+
+  if [[ "$TYPE" = "uninstall" ]]; then
+    if [[ ! "$INSTALLED" = "NAN" ]]; then
+      log "brew package $TOOL uninstalling version: ${STABLE}"
+      $BREW uninstall --force "${FORMULA}"
+    fi
+    return
+  fi
+
+  # Configure additional arguments if installing from a local formula.
+  POSTINSTALL=0
+  ARGS="$ARGS --ignore-dependencies --env=inherit"
+  if [[ "$FORMULA" == *"osquery"* ]]; then
+    if [[ -z "$OSQUERY_BUILD_DEPS" ]]; then
+      ARGS="$ARGS --force-bottle"
+    else
+      ARGS="$ARGS --build-bottle"
+      POSTINSTALL=1
+    fi
+    if [[ "$TYPE" = "dependency" ]]; then
+      ARGS="$ARGS --cc=clang"
+    fi
+    if [[ ! -z "$DEBUG" ]]; then
+      ARGS="$ARGS -vd"
+    fi
+    if [[ ! -z "$VERBOSE" ]]; then
+      ARGS="$ARGS -v"
+    fi
+  else
     ARGS="$ARGS --force-bottle"
   fi
-  if [[ "$TYPE" = "dependency" ]]; then
-    ARGS="$ARGS --cc=clang"
+
+  # If linking, only link if not linked and return immediately.
+  if [[ "$TYPE" = "link" ]]; then
+    if [[ ! "$LINKED" = "$STABLE" ]]; then
+      $BREW link --force "${FORMULA}"
+    fi
+    return
   fi
-  if [[ ! -z "$DEBUG" ]]; then
-    ARGS="$ARGS -vd"
+
+  if [[ "$TYPE" = "unlink" ]]; then
+    if [[ "$LINKED" = "$STABLE" ]]; then
+      $BREW unlink --force "${FORMULA}"
+    fi
+    return
   fi
 
   export HOMEBREW_OPTIMIZATION_LEVEL=-Os
-  if [[ ! -z "$OSQUERY_BUILD_BOTTLES" ]]; then
-    $BREW bottle --skip-relocation "${FORMULA_TAP}/${TOOL}.rb"
+  if [[ ! -z "$OSQUERY_BUILD_BOTTLES" && "$FORMULA" == *"osquery"* ]]; then
+    $BREW bottle --skip-relocation "${FORMULA}"
+  elif [[ "$TYPE" = "clean" ]]; then
+    if [[ ! "${INSTALLED}" = "${STABLE}" && ! "${INSTALLED}" = "NAN" ]]; then
+      log "brew cleaning older version of $TOOL: ${INSTALLED}"
+      $BREW remove --force "${FORMULA}"
+    fi
   elif [[ "${INSTALLED}" = "NAN" || "${INSTALLED}" = "None" ]]; then
-    log "brew local package $TOOL installing new version: ${STABLE}"
+    log "brew package $TOOL installing new version: ${STABLE}"
     $BREW install $ARGS "${FORMULA}"
   elif [[ ! "${INSTALLED}" = "${STABLE}" || "${FROM_BOTTLE}" = "true" ]]; then
-    log "brew local package $TOOL upgrading to new version: ${STABLE}"
-    $BREW uninstall "${FORMULA}"
+    log "brew package $TOOL upgrading to new version: ${STABLE}"
+    $BREW remove --force "${FORMULA}"
     $BREW install $ARGS "${FORMULA}"
   else
-    log "brew local package $TOOL is already install: ${STABLE}"
+    log "brew package $TOOL is already installed: ${STABLE}"
+  fi
+
+  if [[ "$POSTINSTALL" = "1" ]]; then
+    $BREW postinstall "${FORMULA}"
   fi
 }
 
-function local_brew_tool() {
-  local_brew_package "tool" $@
+function brew_tool() {
+  brew_internal "tool" $@
 }
 
-function local_brew_dependency() {
+function brew_dependency() {
   # Essentially uses clang instead of GCC.
-  local_brew_package "dependency" $@
+  set_deps_compilers clang
+  brew_internal "dependency" $@
+  if [[ -f "$DEPS/bin/gcc" ]]; then
+    set_deps_compilers gcc
+  fi
+}
+
+function brew_link() {
+  brew_internal "link" $@
+}
+
+function brew_unlink() {
+  brew_internal "unlink" $@
+}
+
+function brew_uninstall() {
+  brew_internal "uninstall" $@
+}
+
+function brew_clean() {
+  # Remove older versions if installed.
+  brew_internal "clean" $@
+}
+
+function brew_bottle() {
+  TOOL=$1
+  $BREW bottle --skip-relocation "${TOOL}"
+}
+
+function brew_postinstall() {
+  TOOL=$1
+  if [[ ! -z "$OSQUERY_BUILD_DEPS" ]]; then
+    $BREW postinstall "${TOOL}"
+  fi
 }
 
 function package() {
@@ -233,14 +302,6 @@ function package() {
       log "installing $1"
       sudo pacman -S --noconfirm $1
     fi
-  fi
-}
-
-function gem_install() {
-  if [[ -n "$(gem list | grep $1)" ]]; then
-    log "$1 is already installed. skipping."
-  else
-    sudo gem install $@
   fi
 }
 

@@ -7,7 +7,17 @@ module SkipRelocation
   end
 end
 
+def legacy_prefix
+  Pathname.new(ENV["HOMEBREW_PREFIX"])/"legacy"
+end
+
+def default_prefix
+  Pathname.new(ENV["HOMEBREW_PREFIX"])
+end
+
 class AbstractOsqueryFormula < Formula
+  protected
+
   def initialize(*)
     super
 
@@ -21,6 +31,22 @@ class AbstractOsqueryFormula < Formula
     @setup = ENV.has_key?('ABSTRACT_OSQUERY_FORMULA')
     ENV['ABSTRACT_OSQUERY_FORMULA'] = '1'
     return @setup
+  end
+
+  class << self
+    def set_legacy
+      Object.const_set(
+        "HOMEBREW_PREFIX",
+        legacy_prefix
+      )
+    end
+  end
+
+  def osquery_cmake_args
+    std_cmake_args + [
+      "-DCMAKE_LIBRARY_PATH=#{ENV["LIBRARY_PATH"]}",
+      "-DCMAKE_INCLUDE_PATH=#{legacy_prefix}/include:#{default_prefix}/include",
+    ]
   end
 
   def reset(name)
@@ -52,22 +78,15 @@ class AbstractOsqueryFormula < Formula
     self.class_eval(inject_hook)
   end
 
-  def legacy
-    return Formula["glibc-legacy"]
-  end
-
-  def modern
-    return Formula["glibc"]
-  end
-
   def setup_inject
     return if setup
 
-    puts "Hello from setup osquery: #{name}"
+    puts "Hello from osquery setup: #{name}"
 
     # Reset compile flags for safety, we want to control them explicitly.
     reset "CFLAGS"
     reset "CXXFLAGS"
+    reset "CPPFLAGS"
 
     # Reset the following since the logic within the 'std' environment does not
     # known about our legacy runtime 'glibc' formula name.
@@ -84,52 +103,63 @@ class AbstractOsqueryFormula < Formula
       prepend_path "LD_LIBRARY_PATH", prefix
 
       # Set the dynamic linker and library search path.
-      prepend "CFLAGS", "-isystem#{HOMEBREW_PREFIX}/include"
+      prepend "CFLAGS", "-isystem#{default_prefix}/include"
 
       # clang wants -L in the CFLAGS.
       # Several projects do not want this: pcre, RocksDB
       # These used to belong to !gcc but -lz wants the system libz.
-      prepend "CFLAGS", "-L#{HOMEBREW_PREFIX}/lib"
-      prepend "CFLAGS", "-L#{legacy.lib}"
+      prepend "CFLAGS", "-L#{default_prefix}/lib"
+      prepend "CFLAGS", "-L#{legacy_prefix}/lib"
 
       # cmake wants this to have -I
-      prepend "CXXFLAGS", "-I#{HOMEBREW_PREFIX}/include"
-      prepend "CXXFLAGS", "-I#{legacy.include}"
+      prepend "CXXFLAGS", "-I#{default_prefix}/include"
+      prepend "CXXFLAGS", "-I#{legacy_prefix}/include"
 
       # This used to be in the GCC/not-GCC logic, pulling out to compile GCC
       # Using the system compilers with legacy runtime.
-      prepend "CFLAGS", "-isystem#{legacy.include}"
-      prepend "CXXFLAGS", "-isystem#{legacy.include}"
+      prepend "CFLAGS", "-isystem#{legacy_prefix}/include"
+      prepend "CXXFLAGS", "-isystem#{legacy_prefix}/include"
 
-      append "LDFLAGS", "-Wl,--dynamic-linker=#{legacy.lib}/ld-linux-x86-64.so.2"
-      append "LDFLAGS", "-Wl,-rpath,#{legacy.lib}"
+      append "LDFLAGS", "-Wl,--dynamic-linker=#{legacy_prefix}/lib/ld-linux-x86-64.so.2"
+      append "LDFLAGS", "-Wl,-rpath,#{legacy_prefix}/lib"
 
       # Add a runtime search path for the legacy C implementation.
-      append "LDFLAGS", "-Wl,-rpath,#{HOMEBREW_PREFIX}/lib"
-      # Adding this one line to help gcc too.
-      append "LDFLAGS", "-L#{HOMEBREW_PREFIX}/lib"
-      # We want the legacy path to be the last thing prepended.
-      prepend "LDFLAGS", "-L#{legacy.lib}"
+      append "LDFLAGS", "-Wl,-rpath,#{default_prefix}/lib"
 
-      prepend_path "LIBRARY_PATH", HOMEBREW_PREFIX/"lib"
-      prepend_path "LIBRARY_PATH", legacy.lib
+      # Adding this one line to help gcc too.
+      if !["openssl"].include?(self.name)
+        append "LDFLAGS", "-L#{default_prefix}/lib"
+        # We want the legacy path to be the last thing prepended.
+        prepend "LDFLAGS", "-L#{legacy_prefix}/lib"
+      end
+
+      prepend_path "LIBRARY_PATH", default_prefix/"lib"
+      prepend_path "LIBRARY_PATH", legacy_prefix/"lib"
 
       # This is already set to the PREFIX
-      prepend_path "LD_RUN_PATH", HOMEBREW_PREFIX/"lib"
+      prepend_path "LD_RUN_PATH", default_prefix/"lib"
 
       # Set the search path for header files.
-      prepend_path "CPATH", HOMEBREW_PREFIX/"include"
+      prepend_path "CPATH", default_prefix/"include"
+
+      if [ENV["CC"]].include?("#{default_prefix}/bin/clang")
+        append "LDFLAGS", "-lrt -lpthread -ldl"
+      end
     end
 
     if !OS.linux?
-      prepend_path "PATH", HOMEBREW_PREFIX/"bin"
+      prepend_path "PATH", default_prefix/"bin"
+      prepend_path "PYTHONPATH", default_prefix/"lib/python2.7/site-packages"
     end
 
     # Everyone receives:
     append "CFLAGS", "-fPIC -DNDEBUG -Os -march=core2"
     append "CXXFLAGS", "-fPIC -DNDEBUG -Os -march=core2"
 
+    prepend_path "PKG_CONFIG_PATH", legacy_prefix/"lib/pkgconfig"
+
     self.audit
+    reset "DEBUG"
   end
 
   def audit
@@ -146,5 +176,6 @@ class AbstractOsqueryFormula < Formula
     puts ":: LD_LIBRARY_PATH : " + ENV["LD_LIBRARY_PATH"].to_s
     puts ":: LIBRARY_PATH    : " + ENV["LIBRARY_PATH"].to_s
     puts ":: LD_RUN_PATH     : " + ENV["LD_RUN_PATH"].to_s
+    puts ":: PKG_CONFIG_PATH : " + ENV["PKG_CONFIG_PATH"].to_s
   end
 end

@@ -30,7 +30,7 @@ DECLARE_bool(disable_reenrollment);
  * @brief Helper class for allowing TLS plugins to easily kick off requests
  *
  * There are many static functions in this class that have very similar
- * behaviour, which allow them to be used in many context. Some methods accept
+ * behavior, which allow them to be used in many context. Some methods accept
  * parameters, some don't require them. Some have built-in retry logic, some
  * don't. Some return results in a ptree, some return results in JSON, etc.
  */
@@ -91,14 +91,37 @@ class TLSRequestHelper : private boost::noncopyable {
     auto request = Request<TLSTransport, TSerializer>(uri + uri_suffix);
     request.setOption("hostname", FLAGS_tls_hostname);
 
+    bool compress = false;
+    if (params.count("_compress")) {
+      compress = true;
+      request.setOption("compress", true);
+      params.erase("_compress");
+    }
+
     // The caller-supplied parameters may force a POST request.
     bool force_post = false;
-    if (params.count("verb")) {
-      force_post = (params.get<std::string>("verb") == "POST");
-      params.erase("verb");
+    if (params.count("_verb")) {
+      force_post = (params.get<std::string>("_verb") == "POST");
+      params.erase("_verb");
     }
-    auto status = (FLAGS_tls_node_api && !force_post) ? request.call()
-                                                      : request.call(params);
+
+    bool use_post = true;
+    if (params.count("_get")) {
+      use_post = false;
+      params.erase("_get");
+    }
+    bool should_post = (use_post || force_post);
+    auto status = (should_post) ? request.call(params) : request.call();
+
+    // Restore caller-supplied parameters.
+    if (force_post) {
+      params.put("_verb", "POST");
+    }
+
+    if (compress) {
+      params.put("_compress", true);
+    }
+
     if (!status.ok()) {
       return status;
     }
@@ -110,17 +133,25 @@ class TLSRequestHelper : private boost::noncopyable {
     }
 
     // Receive config or key rejection
-    if (output.count("error") > 0) {
-      return Status(1, "Request failed: " + output.get("error", "<unknown>"));
-    } else if (output.count("node_invalid") > 0) {
+    if (output.count("node_invalid") > 0) {
       auto invalid = output.get("node_invalid", "");
       if (invalid == "1" || invalid == "true" || invalid == "True") {
         if (!FLAGS_disable_reenrollment) {
           clearNodeKey();
         }
-        return Status(1, "Request failed: Invalid node key");
+
+        std::string message = "Request failed: Invalid node key";
+        if (output.count("error") > 0) {
+          message += ": " + output.get("error", "<unknown>");
+        }
+        return Status(1, message);
       }
     }
+
+    if (output.count("error") > 0) {
+      return Status(1, "Request failed: " + output.get("error", "<unknown>"));
+    }
+
     return Status(0, "OK");
   }
 
@@ -137,6 +168,7 @@ class TLSRequestHelper : private boost::noncopyable {
   static Status go(const std::string& uri,
                    boost::property_tree::ptree& output) {
     boost::property_tree::ptree params;
+    params.put("_get", true);
     return TLSRequestHelper::go<TSerializer>(uri, params, output);
   }
 
@@ -176,6 +208,7 @@ class TLSRequestHelper : private boost::noncopyable {
   template <class TSerializer>
   static Status go(const std::string& uri, std::string& output) {
     boost::property_tree::ptree params;
+    params.put("_get", true);
     return TLSRequestHelper::go<TSerializer>(uri, params, output);
   }
 
@@ -205,7 +238,7 @@ class TLSRequestHelper : private boost::noncopyable {
       if (i == attempts) {
         break;
       }
-      sleepFor(i * i);
+      sleepFor(i * i * 1000);
     }
     return s;
   }
@@ -225,6 +258,7 @@ class TLSRequestHelper : private boost::noncopyable {
                    std::string& output,
                    const size_t attempts) {
     boost::property_tree::ptree params;
+    params.put("_get", true);
     return TLSRequestHelper::go<TSerializer>(uri, params, output, attempts);
   }
 };

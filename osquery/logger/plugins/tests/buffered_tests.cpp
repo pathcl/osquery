@@ -14,15 +14,15 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-#include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 
 #include <osquery/dispatcher.h>
 #include <osquery/logger.h>
 #include <osquery/system.h>
 
-#include "osquery/tests/test_util.h"
+#include "osquery/core/json.h"
 #include "osquery/logger/plugins/buffered.h"
+#include "osquery/tests/test_util.h"
 
 using namespace testing;
 namespace pt = boost::property_tree;
@@ -215,22 +215,14 @@ TEST_F(BufferedLogForwarderTests, test_multiple) {
 TEST_F(BufferedLogForwarderTests, test_async) {
   auto runner = std::make_shared<StrictMock<MockBufferedLogForwarder>>(
       "mock", kLogPeriod);
-  Dispatcher::addService(runner);
+  runner->mustRun();
 
   EXPECT_CALL(*runner, send(ElementsAre("foo"), "result"))
       .WillOnce(Return(Status(0)));
   runner->logString("foo");
-  std::this_thread::sleep_for(5 * kLogPeriod);
 
-  EXPECT_CALL(*runner, send(ElementsAre("bar"), "result"))
-      .Times(3)
-      .WillOnce(Return(Status(1, "fail")))
-      .WillOnce(Return(Status(1, "fail again")))
-      .WillOnce(Return(Status(0)));
-  runner->logString("bar");
-  std::this_thread::sleep_for(15 * kLogPeriod);
-
-  Dispatcher::stopServices();
+  Dispatcher::addService(runner);
+  runner->interrupt();
   Dispatcher::joinServices();
 }
 

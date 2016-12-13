@@ -8,7 +8,6 @@
  *
  */
 
-#include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 
 #include <osquery/enroll.h>
@@ -19,6 +18,7 @@
 #include "osquery/remote/utility.h"
 
 #include "osquery/config/parsers/decorators.h"
+#include "osquery/core/json.h"
 #include "osquery/logger/plugins/tls.h"
 
 namespace pt = boost::property_tree;
@@ -43,11 +43,10 @@ FLAG(bool, logger_tls_compress, false, "GZip compress TLS/HTTPS request body");
 
 REGISTER(TLSLoggerPlugin, "logger", "tls");
 
-TLSLogForwarder::TLSLogForwarder(const std::string& node_key)
+TLSLogForwarder::TLSLogForwarder()
     : BufferedLogForwarder("tls",
                            std::chrono::seconds(FLAGS_logger_tls_period),
-                           kTLSMaxLogLines),
-      node_key_(node_key) {
+                           kTLSMaxLogLines) {
   uri_ = TLSRequestHelper::makeURI(FLAGS_logger_tls_endpoint);
 }
 
@@ -65,9 +64,17 @@ Status TLSLoggerPlugin::setUp() {
     // Could not generate a node key, continue logging to stderr.
     return Status(1, "No node key, TLS logging disabled.");
   }
+
   // Start the log forwarding/flushing thread.
-  forwarder_ = std::make_shared<TLSLogForwarder>(node_key);
+  forwarder_ = std::make_shared<TLSLogForwarder>();
+  Status s = forwarder_->setUp();
+  if (!s.ok()) {
+    LOG(ERROR) << "Error initializing TLS logger: " << s.getMessage();
+    return s;
+  }
+
   Dispatcher::addService(forwarder_);
+
   return Status(0);
 }
 
@@ -82,7 +89,7 @@ void TLSLoggerPlugin::init(const std::string& name,
 Status TLSLogForwarder::send(std::vector<std::string>& log_data,
                              const std::string& log_type) {
   pt::ptree params;
-  params.put<std::string>("node_key", node_key_);
+  params.put<std::string>("node_key", getNodeKey("tls"));
   params.put<std::string>("log_type", log_type);
 
   {
@@ -103,7 +110,7 @@ Status TLSLogForwarder::send(std::vector<std::string>& log_data,
                 input << item;
                 std::string().swap(item);
                 pt::read_json(input, child);
-              } catch (const pt::json_parser::json_parser_error& e) {
+              } catch (const pt::json_parser::json_parser_error& /* e */) {
                 // The log line entered was not valid JSON, skip it.
                 return;
               }
@@ -112,11 +119,12 @@ Status TLSLogForwarder::send(std::vector<std::string>& log_data,
     params.add_child("data", std::move(children));
   }
 
-  auto request = Request<TLSTransport, JSONSerializer>(uri_);
-  request.setOption("hostname", FLAGS_tls_hostname);
+  // The response body is ignored (status is set appropriately by
+  // TLSRequestHelper::go())
+  std::string response;
   if (FLAGS_logger_tls_compress) {
-    request.setOption("compress", true);
+    params.put("_compress", true);
   }
-  return request.call(params);
+  return TLSRequestHelper::go<JSONSerializer>(uri_, params, response);
 }
 }

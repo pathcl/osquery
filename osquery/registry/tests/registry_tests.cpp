@@ -101,12 +101,16 @@ class DogPlugin : public Plugin {
 
 class Doge : public DogPlugin {
  public:
-  Doge() { some_value_ = 100000; }
+  Doge() {
+    some_value_ = 100000;
+  }
 };
 
 class BadDoge : public DogPlugin {
  public:
-  Status setUp() { return Status(1, "Expect error... this is a bad dog"); }
+  Status setUp() {
+    return Status(1, "Expect error... this is a bad dog");
+  }
 };
 
 auto AutoDogRegistry = TestCoreRegistry::create<DogPlugin>("dog", true);
@@ -134,13 +138,13 @@ TEST_F(RegistryTests, test_registry_exceptions) {
   unsigned int exception_count = 0;
   try {
     TestCoreRegistry::registry("does_not_exist");
-  } catch (const std::out_of_range& e) {
+  } catch (const std::out_of_range& /* e */) {
     exception_count++;
   }
 
   try {
     TestCoreRegistry::add<HouseCat>("does_not_exist", "cat");
-  } catch (const std::out_of_range& e) {
+  } catch (const std::out_of_range& /* e */) {
     exception_count++;
   }
 
@@ -238,7 +242,7 @@ TEST_F(RegistryTests, test_registry_modules) {
   RegistryFactory::locked(false);
 
   // Test initializing a module load and the module's registry modifications.
-  EXPECT_EQ(RegistryFactory::getModule(), 0);
+  EXPECT_EQ(0U, RegistryFactory::getModule());
   RegistryFactory::initModule("/my/test/module");
   // The registry is locked, no modifications during module global ctors.
   EXPECT_TRUE(RegistryFactory::locked());
@@ -267,6 +271,6 @@ TEST_F(RegistryTests, test_registry_modules) {
   EXPECT_TRUE(RegistryFactory::locked());
   // And the registry is no longer using a module.
   EXPECT_FALSE(RegistryFactory::usingModule());
-  EXPECT_EQ(RegistryFactory::getModule(), 0);
+  EXPECT_EQ(0U, RegistryFactory::getModule());
 }
 }

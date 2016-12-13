@@ -30,8 +30,9 @@ class ExampleTable : public TablePlugin {
  private:
   TableColumns columns() const {
     return {
-        std::make_tuple("example_text", TEXT_TYPE, DEFAULT),
-        std::make_tuple("example_integer", INTEGER_TYPE, DEFAULT),
+        std::make_tuple("example_text", TEXT_TYPE, ColumnOptions::DEFAULT),
+        std::make_tuple(
+            "example_integer", INTEGER_TYPE, ColumnOptions::DEFAULT),
     };
   }
 
@@ -64,8 +65,8 @@ class ComplexExampleTable : public TablePlugin {
  private:
   TableColumns columns() const {
     return {
-        std::make_tuple("flag_test", TEXT_TYPE, DEFAULT),
-        std::make_tuple("database_test", TEXT_TYPE, DEFAULT),
+        std::make_tuple("flag_test", TEXT_TYPE, ColumnOptions::DEFAULT),
+        std::make_tuple("database_test", TEXT_TYPE, ColumnOptions::DEFAULT),
     };
   }
 
@@ -94,7 +95,7 @@ REGISTER_EXTERNAL(ExampleTable, "table", "example");
 REGISTER_EXTERNAL(ComplexExampleTable, "table", "complex_example");
 
 int main(int argc, char* argv[]) {
-  osquery::Initializer runner(argc, argv, OSQUERY_EXTENSION);
+  osquery::Initializer runner(argc, argv, ToolType::EXTENSION);
 
   auto status = startExtension("example", "0.0.1");
   if (!status.ok()) {

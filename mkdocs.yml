@@ -3,16 +3,19 @@ theme: readthedocs
 
 docs_dir: docs/wiki
 site_dir: build/wiki
+extra_css:
+- theme/osquery.css
+
 pages:
 - Introduction:
   - Welcome to osquery: index.md
-  - Features Overview: introduction/overview.md
   - osqueryi (shell): introduction/using-osqueryi.md
   - osqueryd (daemon): introduction/using-osqueryd.md
-  - SQL Intro: introduction/sql.md
+  - SQL Introduction: introduction/sql.md
 - Installation:
   - Install on OS X: installation/install-osx.md
   - Install on Linux: installation/install-linux.md
+  - Install on Windows: installation/install-windows.md
   - Install on FreeBSD: installation/install-freebsd.md
   - Command Line Flags: installation/cli-flags.md
   - 'Optional: Custom Packages': installation/custom-packages.md
@@ -28,7 +31,7 @@ pages:
   - YARA Scanning: deployment/yara.md
   - Process Auditing: deployment/process-auditing.md
   - Remote Settings: deployment/remote.md
-  - Syslog: deployment/syslog.md
+  - Syslog Consumption: deployment/syslog.md
   - Debugging: deployment/debugging.md
 - Development:
   - Building osquery: development/building.md
@@ -41,5 +44,5 @@ pages:
   - Writing Tests: development/unit-tests.md
   - Adding CLI Arguments: development/options-arguments.md
   - Reading/Writing Files: development/reading-files.md
-  - Kernel: development/kernel.md
   - Windows Provisioning: development/windows-provisioning.md
+  - Kernel: development/kernel.md

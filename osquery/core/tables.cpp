@@ -8,12 +8,12 @@
  *
  */
 
-#include <boost/property_tree/json_parser.hpp>
-
 #include <osquery/database.h>
 #include <osquery/flags.h>
 #include <osquery/logger.h>
 #include <osquery/tables.h>
+
+#include "osquery/core/json.h"
 
 namespace pt = boost::property_tree;
 
@@ -56,7 +56,6 @@ void TablePlugin::removeExternal(const std::string& name) {
 void TablePlugin::setRequestFromContext(const QueryContext& context,
                                         PluginRequest& request) {
   pt::ptree tree;
-  tree.put("limit", context.limit);
 
   // The QueryContext contains a constraint map from column to type information
   // and the list of operand/expression constraints applied to that column from
@@ -74,7 +73,7 @@ void TablePlugin::setRequestFromContext(const QueryContext& context,
   std::ostringstream output;
   try {
     pt::write_json(output, tree, false);
-  } catch (const pt::json_parser::json_parser_error& e) {
+  } catch (const pt::json_parser::json_parser_error& /* e */) {
     // The content could not be represented as JSON.
   }
   request["context"] = output.str();
@@ -92,12 +91,11 @@ void TablePlugin::setContextFromRequest(const PluginRequest& request,
     std::stringstream input;
     input << request.at("context");
     pt::read_json(input, tree);
-  } catch (const pt::json_parser::json_parser_error& e) {
+  } catch (const pt::json_parser::json_parser_error& /* e */) {
     return;
   }
 
   // Set the context limit and deserialize each column constraint list.
-  context.limit = tree.get<int>("limit", 0);
   for (const auto& constraint : tree.get_child("constraints")) {
     auto column_name = constraint.second.get<std::string>("name");
     context.constraints[column_name].unserialize(constraint.second);
@@ -127,10 +125,6 @@ Status TablePlugin::call(const PluginRequest& request,
     // The "columns" action returns a PluginRequest filled with column
     // information such as name and type.
     response = routeInfo();
-  } else if (request.at("action") == "definition") {
-    response.push_back({
-        {"definition", columnDefinition()},
-    });
   } else {
     return Status(1, "Unknown table plugin action: " + request.at("action"));
   }
@@ -146,10 +140,11 @@ PluginResponse TablePlugin::routeInfo() const {
   // Route info consists of the serialized column information.
   PluginResponse response;
   for (const auto& column : columns()) {
-    response.push_back({{"id", "column"},
-                        {"name", std::get<0>(column)},
-                        {"type", columnTypeName(std::get<1>(column))},
-                        {"op", INTEGER(std::get<2>(column))}});
+    response.push_back(
+        {{"id", "column"},
+         {"name", std::get<0>(column)},
+         {"type", columnTypeName(std::get<1>(column))},
+         {"op", INTEGER(static_cast<size_t>(std::get<2>(column)))}});
   }
   // Each table name alias is provided such that the core may add the views.
   // These views need to be removed when the backing table is detached.
@@ -165,6 +160,10 @@ PluginResponse TablePlugin::routeInfo() const {
           {{"id", "columnAlias"}, {"name", alias}, {"target", target.first}});
     }
   }
+
+  response.push_back(
+      {{"id", "attributes"},
+       {"attributes", INTEGER(static_cast<size_t>(attributes()))}});
   return response;
 }
 
@@ -202,11 +201,11 @@ std::string columnDefinition(const TableColumns& columns) {
     statement +=
         "`" + std::get<0>(column) + "` " + columnTypeName(std::get<1>(column));
     auto& options = std::get<2>(column);
-    if (options & INDEX) {
+    if (options & ColumnOptions::INDEX) {
       statement += " PRIMARY KEY";
       epilog["WITHOUT ROWID"] = true;
     }
-    if (options & HIDDEN) {
+    if (options & ColumnOptions::HIDDEN) {
       statement += " HIDDEN";
     }
     if (i < columns.size() - 1) {
@@ -235,7 +234,7 @@ std::string columnDefinition(const PluginResponse& response, bool aliases) {
       auto options =
           (column.count("op"))
               ? (ColumnOptions)AS_LITERAL(INTEGER_LITERAL, column.at("op"))
-              : DEFAULT;
+              : ColumnOptions::DEFAULT;
       auto column_type = columnTypeName(column.at("type"));
       columns.push_back(make_tuple(column.at("name"), column_type, options));
       if (aliases) {
@@ -248,8 +247,8 @@ std::string columnDefinition(const PluginResponse& response, bool aliases) {
         // No type was defined for the alias target.
         continue;
       }
-      columns.push_back(
-          make_tuple(column.at("name"), column_types.at(target), HIDDEN));
+      columns.push_back(make_tuple(
+          column.at("name"), column_types.at(target), ColumnOptions::HIDDEN));
     }
   }
   return columnDefinition(columns);

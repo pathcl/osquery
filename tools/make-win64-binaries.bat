@@ -1,10 +1,15 @@
+call "%VS140COMNTOOLS%vcvarsqueryregistry.bat" 64bit
+call "%VCINSTALLDIR%vcvarsall.bat" amd64
+
 mkdir .\build\windows10
 cd .\build\windows10
 cmake ..\.. -G "Visual Studio 14 2015 Win64"
 
-"C:\Program Files (x86)\MSBuild\14.0\Bin\MSBuild.exe" .\osquery\shell.vcxproj /t:Build /p:Configuration=Release
+for %%t in (shell,daemon,osquery_tests,osquery_additional_tests,osquery_tables_tests) do (
+  cmake --build . --target %%t --config Release -- /verbosity:minimal /maxcpucount
+  if errorlevel 1 goto end
+)
 
-copy "C:\ProgramData\chocolatey\lib\linenoise-ng\local\bin\linenoise.dll" .\osquery\Release\linenoise.dll
-copy "C:\ProgramData\chocolatey\lib\glog\local\bin\glog.dll" .\osquery\Release\glog.dll
-copy "C:\ProgramData\chocolatey\lib\openssl\local\bin\libeay32.dll" .\osquery\Release\libeay32.dll
+ctest --output-on-failure
 
+:end

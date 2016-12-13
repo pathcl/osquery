@@ -21,15 +21,17 @@
 #include "osquery/core/process.h"
 #include "osquery/database/query.h"
 #include "osquery/dispatcher/scheduler.h"
-#include "osquery/sql/sqlite_util.h"
 
 namespace osquery {
 
-FLAG(bool, enable_monitor, false, "Enable the schedule monitor");
+FLAG(bool, enable_monitor, true, "Enable the schedule monitor");
 
 FLAG(uint64, schedule_timeout, 0, "Limit the schedule, 0 for no limit")
 
-inline SQL monitor(const std::string& name, const ScheduledQuery& query) {
+/// Used to bypass (optimize-out) the set-differential of query results.
+DECLARE_bool(events_optimize);
+
+SQLInternal monitor(const std::string& name, const ScheduledQuery& query) {
   // Snapshot the performance and times for the worker before running.
   auto pid = std::to_string(PlatformProcess::getCurrentProcess()->pid());
   auto r0 = SQL::selectAllFrom("processes", "pid", EQUALS, pid);
@@ -50,22 +52,22 @@ inline SQL monitor(const std::string& name, const ScheduledQuery& query) {
       }
     }
     // Always called while processes table is working.
-    Config::getInstance().recordQueryPerformance(name, t1 - t0, size, r0[0],
-                                                 r1[0]);
+    Config::getInstance().recordQueryPerformance(
+        name, t1 - t0, size, r0[0], r1[0]);
   }
   return sql;
 }
 
 inline void launchQuery(const std::string& name, const ScheduledQuery& query) {
   // Execute the scheduled query and create a named query object.
-  VLOG(1) << "Executing query: " << query.query;
+  LOG(INFO) << "Executing scheduled query: " << name << ": " << query.query;
   runDecorators(DECORATE_ALWAYS);
   auto sql =
       (FLAGS_enable_monitor) ? monitor(name, query) : SQLInternal(query.query);
 
   if (!sql.ok()) {
-    LOG(ERROR) << "Error executing query (" << query.query
-               << "): " << sql.getMessageString();
+    LOG(ERROR) << "Error executing scheduled query: " << name << ": "
+               << sql.getMessageString();
     return;
   }
 
@@ -93,25 +95,31 @@ inline void launchQuery(const std::string& name, const ScheduledQuery& query) {
   // Comparisons and stores must include escaped data.
   sql.escapeResults();
 
+  Status status;
   DiffResults diff_results;
   // Add this execution's set of results to the database-tracked named query.
   // We can then ask for a differential from the last time this named query
   // was executed by exact matching each row.
-  auto status = dbQuery.addNewResults(sql.rows(), diff_results);
-  if (!status.ok()) {
-    std::string line = "Error adding new results to database: " + status.what();
-    LOG(ERROR) << line;
+  if (!FLAGS_events_optimize || !sql.eventBased()) {
+    status = dbQuery.addNewResults(sql.rows(), diff_results);
+    if (!status.ok()) {
+      std::string line =
+          "Error adding new results to database: " + status.what();
+      LOG(ERROR) << line;
 
-    // If the database is not available then the daemon cannot continue.
-    Initializer::requestShutdown(EXIT_CATASTROPHIC, line);
+      // If the database is not available then the daemon cannot continue.
+      Initializer::requestShutdown(EXIT_CATASTROPHIC, line);
+    }
+  } else {
+    diff_results.added = std::move(sql.rows());
   }
 
-  if (diff_results.added.size() == 0 && diff_results.removed.size() == 0) {
+  if (diff_results.added.empty() && diff_results.removed.empty()) {
     // No diff results or events to emit.
     return;
   }
 
-  VLOG(1) << "Found results for query (" << name << ") for host: " << ident;
+  VLOG(1) << "Found results for query: " << name;
   item.results = diff_results;
   if (query.options.count("removed") && !query.options.at("removed")) {
     item.results.removed.clear();
@@ -119,8 +127,11 @@ inline void launchQuery(const std::string& name, const ScheduledQuery& query) {
 
   status = logQueryLogItem(item);
   if (!status.ok()) {
-    LOG(ERROR) << "Error logging the results of query (" << query.query
-               << "): " << status.toString();
+    // If log directory is not available, then the daemon shouldn't continue.
+    std::string error = "Error logging the results of query: " + name + ": " +
+                        status.toString();
+    LOG(ERROR) << error;
+    Initializer::requestShutdown(EXIT_CATASTROPHIC, error);
   }
 }
 
@@ -148,7 +159,9 @@ void SchedulerRunner::start() {
   }
 }
 
-void startScheduler() { startScheduler(FLAGS_schedule_timeout, 1); }
+void startScheduler() {
+  startScheduler(static_cast<unsigned long int>(FLAGS_schedule_timeout), 1);
+}
 
 void startScheduler(unsigned long int timeout, size_t interval) {
   Dispatcher::addService(std::make_shared<SchedulerRunner>(timeout, interval));

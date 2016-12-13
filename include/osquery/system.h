@@ -45,7 +45,7 @@ class Initializer : private boost::noncopyable {
    * @param argv the command-line arguments passed to `main()`
    * @param tool the type of osquery main (daemon, shell, test, extension).
    */
-  Initializer(int& argc, char**& argv, ToolType tool = OSQUERY_TOOL_TEST);
+  Initializer(int& argc, char**& argv, ToolType tool = ToolType::TEST);
 
   /**
    * @brief Sets up the process as an osquery daemon.
@@ -119,6 +119,20 @@ class Initializer : private boost::noncopyable {
    */
   static void waitForShutdown();
 
+  /**
+   * @brief Initialize any platform dependent libraries or objects
+   *
+   * On windows, we require the COM libraries be initialized just once
+   */
+  static void platformSetup();
+
+  /**
+  * @brief Before ending, tear down any platform specific setup
+  *
+  * On windows, we require the COM libraries be initialized just once
+  */
+  static void platformTeardown();
+
  public:
   /**
    * @brief Check if a process is an osquery worker.
@@ -182,8 +196,13 @@ class DropPrivileges : private boost::noncopyable {
   /// See DropPrivileges::dropToParent but explicitly set the UID and GID.
   bool dropTo(uid_t uid, gid_t gid);
 
+  /// See DropPrivileges::dropToParent but for a user's UID and GID.
+  bool dropTo(const std::string& user);
+
   /// Check if effective privileges do not match real.
-  bool dropped() { return (getuid() != geteuid() || getgid() != getegid()); }
+  bool dropped() {
+    return (getuid() != geteuid() || getgid() != getegid());
+  }
 
   /**
    * @brief The privilege/permissions dropper deconstructor will restore
@@ -208,13 +227,6 @@ class DropPrivileges : private boost::noncopyable {
 
   /// The group this instance dropped privileges to.
   gid_t to_group_;
-
-  /// If this was a filesystem-prompted privilege drop.
-  bool fs_drop_{false};
-
-  /// Store times for restoration if requested.
-  struct timespec atime;
-  struct timespec mtime;
 
   /**
    * @brief If dropping explicitly to a user and group also drop groups.
@@ -284,10 +296,18 @@ std::string getAsciiTime();
  */
 Status createPidFile();
 
+/**
+* @brief Getter for determining Admin status
+*
+* @return A bool indicating if the current process is running as admin
+*/
+bool isUserAdmin();
+
 #ifdef WIN32
 // Microsoft provides FUNCTION_s with more or less the same parameters.
 // Notice that they are swapped when compared to POSIX FUNCTION_r.
 struct tm* gmtime_r(time_t* t, struct tm* result);
+
 struct tm* localtime_r(time_t* t, struct tm* result);
 #endif
 }

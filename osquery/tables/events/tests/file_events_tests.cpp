@@ -10,8 +10,6 @@
 
 #include <gtest/gtest.h>
 
-#include <boost/property_tree/json_parser.hpp>
-
 #include <osquery/config.h>
 #include <osquery/events.h>
 #include <osquery/flags.h>
@@ -19,8 +17,9 @@
 #include <osquery/registry.h>
 #include <osquery/sql.h>
 
-#include "osquery/tests/test_util.h"
+#include "osquery/core/json.h"
 #include "osquery/tables/events/event_utils.h"
+#include "osquery/tests/test_util.h"
 
 namespace osquery {
 
@@ -41,15 +40,20 @@ class FileEventsTableTests : public testing::Test {
     Registry::registry("config_parser")->setUp();
   }
 
-  void TearDown() override { FLAGS_registry_exceptions = exceptions_; }
+  void TearDown() override {
+    FLAGS_registry_exceptions = exceptions_;
+  }
 
  protected:
-  Status load() { return Config::getInstance().load(); }
+  Status load() {
+    return Config::getInstance().load();
+  }
 
  private:
   bool exceptions_{false};
 };
 
+#ifndef WIN32
 TEST_F(FileEventsTableTests, test_subscriber_exists) {
   ASSERT_TRUE(Registry::exists("event_subscriber", "file_events"));
 
@@ -59,6 +63,7 @@ TEST_F(FileEventsTableTests, test_subscriber_exists) {
       reinterpret_cast<std::shared_ptr<FileEventSubscriber>*>(&plugin);
   EXPECT_NE(subscriber, nullptr);
 }
+#endif
 
 TEST_F(FileEventsTableTests, test_table_empty) {
   // Attach/create the publishers.
@@ -78,6 +83,7 @@ class FileEventsTestsConfigPlugin : public ConfigPlugin {
   }
 };
 
+#ifndef WIN32
 TEST_F(FileEventsTableTests, test_configure_subscriptions) {
   // Attach/create the publishers.
   attachEvents();
@@ -103,4 +109,5 @@ TEST_F(FileEventsTableTests, test_configure_subscriptions) {
   auto& row2 = results.rows()[0];
   EXPECT_EQ(row2.at("subscriptions"), "0");
 }
+#endif
 }

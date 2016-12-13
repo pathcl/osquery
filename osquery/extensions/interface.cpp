@@ -8,6 +8,10 @@
  *
  */
 
+#include <string>
+
+#include <thrift/TOutput.h>
+
 #include <osquery/core.h>
 #include <osquery/filesystem.h>
 #include <osquery/logger.h>
@@ -19,6 +23,10 @@ using namespace osquery::extensions;
 
 namespace osquery {
 namespace extensions {
+
+const std::vector<std::string> kSDKVersionChanges = {
+    {"1.7.7"},
+};
 
 void ExtensionHandler::ping(ExtensionStatus& _return) {
   _return.code = ExtensionCode::EXT_SUCCESS;
@@ -64,6 +72,23 @@ void ExtensionHandler::shutdown() {
   Initializer::requestShutdown(EXIT_SUCCESS);
 }
 
+/**
+ * @brief Updates the Thrift server output to be VLOG
+ *
+ * On Windows, the thrift server will output to stdout, which displays
+ * messages to the user on exiting the client. This function is used
+ * instead of the default output for thrift.
+ *
+ * @param msg The text to be logged
+ */
+void thriftLoggingOutput(const char* msg) {
+  VLOG(1) << "Thrift message: " << msg;
+}
+
+ExtensionManagerHandler::ExtensionManagerHandler() {
+  GlobalOutput.setOutputFunction(thriftLoggingOutput);
+}
+
 void ExtensionManagerHandler::extensions(InternalExtensionList& _return) {
   refresh();
   _return = extensions_;
@@ -89,15 +114,26 @@ void ExtensionManagerHandler::registerExtension(
     return;
   }
 
+  // Enforce API change requirements.
+  for (const auto& change : kSDKVersionChanges) {
+    if (!versionAtLeast(change, info.sdk_version)) {
+      LOG(WARNING) << "Could not add extension " << info.name
+                   << ": incompatible extension SDK " << info.sdk_version;
+      _return.code = ExtensionCode::EXT_FAILED;
+      _return.message = "Incompatible extension SDK version";
+      return;
+    }
+  }
+
   // Every call to registerExtension is assigned a new RouteUUID.
-  RouteUUID uuid = rand();
-  LOG(INFO) << "Registering extension (" << info.name << ", " << uuid
-            << ", version=" << info.version << ", sdk=" << info.sdk_version
-            << ")";
+  RouteUUID uuid = (uint16_t)rand();
+  VLOG(1) << "Registering extension (" << info.name << ", " << uuid
+          << ", version=" << info.version << ", sdk=" << info.sdk_version
+          << ")";
 
   if (!Registry::addBroadcast(uuid, registry).ok()) {
-    LOG(WARNING) << "Could not add extension (" << info.name << ", " << uuid
-                 << ") broadcast to registry";
+    LOG(WARNING) << "Could not add extension " << info.name
+                 << ": invalid extension registry";
     _return.code = ExtensionCode::EXT_FAILED;
     _return.message = "Failed adding registry broadcast";
     return;
@@ -185,7 +221,9 @@ bool ExtensionManagerHandler::exists(const std::string& name) {
 }
 }
 
-ExtensionRunnerCore::~ExtensionRunnerCore() { remove(path_); }
+ExtensionRunnerCore::~ExtensionRunnerCore() {
+  remove(path_);
+}
 
 void ExtensionRunnerCore::stop() {
   {
@@ -219,9 +257,13 @@ void ExtensionRunnerCore::startServer(TProcessorRef processor) {
       return;
     }
 
-    transport_ = TServerTransportRef(new TServerSocket(path_));
-    // Before starting and after stopping the manager, remove stale sockets.
-    removeStalePaths(path_);
+    transport_ = TServerTransportRef(new TPlatformServerSocket(path_));
+
+    if (!isPlatform(PlatformType::TYPE_WINDOWS)) {
+      // Before starting and after stopping the manager, remove stale sockets.
+      // This is not relevant in Windows
+      removeStalePaths(path_);
+    }
 
     // Construct the service's transport, protocol, thread pool.
     auto transport_fac = TTransportFactoryRef(new TBufferedTransportFactory());

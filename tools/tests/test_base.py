@@ -18,7 +18,6 @@ import os
 import psutil
 import random
 import re
-import shutil
 import signal
 import subprocess
 import sys
@@ -27,6 +26,10 @@ import threading
 import unittest
 import utils
 import pexpect
+
+# While this path can be variable, in practice is lives statically.
+OSQUERY_DEPENDENCIES = "/usr/local/osquery"
+sys.path = [OSQUERY_DEPENDENCIES + "/lib/python2.7/site-packages"] + sys.path
 
 try:
     from pexpect.replwrap import REPLWrapper
@@ -120,12 +123,21 @@ class OsqueryWrapper(REPLWrapper):
         # On Mac, the query appears first in the string. Remove it if so.
         result = re.sub(re.escape(query), '', result).strip()
         result_lines = result.splitlines()
-
-        if len(result_lines) < 1:
+        if len(result_lines) < 2:
             raise OsqueryUnknownException(
-                'Unexpected output:\n %s' % result_lines)
-        if result_lines[0].startswith(self.ERROR_PREFIX):
-            raise OsqueryException(result_lines[0])
+                'Unexpected output:\n %s' % result_lines[0])
+        if result_lines[1].startswith(self.ERROR_PREFIX):
+            raise OsqueryException(result_lines[1])
+
+        noise = 0
+        for l in result_lines:
+            if len(l) == 0 or l[0] != '+':
+                # This is not a result line
+                noise += 1
+            elif l[0] == '+':
+                break
+        for l in range(noise):
+            result_lines.pop(0)
 
         try:
             header = result_lines[1]
@@ -277,8 +289,7 @@ class ProcessGenerator(object):
     generators = []
 
     def setUp(self):
-        shutil.rmtree(CONFIG_DIR)
-        os.makedirs(CONFIG_DIR)
+        utils.reset_dir(CONFIG_DIR)
 
     def _run_daemon(self, options={}, silent=False, options_only={},
                     overwrite={}):
@@ -446,9 +457,10 @@ def flaky(gen):
             worked = gen(this)
             return True
         except Exception as e:
-            exc_type, exc_obj, exc_tb = sys.exc_info()
-            fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-            exceptions.append((e, fname, exc_tb.tb_lineno))
+            import traceback
+            exc_type, exc_obj, tb = sys.exc_info()
+            exceptions.append(e)
+            print (traceback.format_tb(tb)[1])
         return False
     def wrapper(this):
         for i in range(3):
@@ -456,12 +468,14 @@ def flaky(gen):
                 return True
         i = 1
         for exc in exceptions:
-            print("Test (attempt %d) %s::%s failed: %s (%s:%d)" % (
+            print("Test (attempt %d) %s::%s failed: %s" % (
                 i,
                 this.__class__.__name__,
-                gen.__name__,  str(exc[0]), exc[1], exc[2]))
+                gen.__name__,  str(exc[0])))
             i += 1
-        raise exceptions[0][0]
+        if len(exceptions) > 0:
+            raise exceptions[0]
+        return False
     return wrapper
 >>>>>>> 769a723b5ccb97037b678a874480f37beb2281c6
 
@@ -498,12 +512,7 @@ class Tester(object):
         # Write config
         random.seed(time.time())
 
-        try:
-            shutil.rmtree(CONFIG_DIR)
-        except:
-            # Allow the tester to fail
-            pass
-        os.makedirs(CONFIG_DIR)
+        utils.reset_dir(CONFIG_DIR)
         CONFIG = read_config(ARGS.config) if ARGS.config else DEFAULT_CONFIG
 
     def run(self):
@@ -602,11 +611,7 @@ def assertPermissions():
 
 def getTestDirectory(base):
     path = os.path.join(base, "test-dir" + str(random.randint(1000, 9999)))
-    try:
-        shutil.rmtree(path)
-    except:
-        pass
-    os.makedirs(path)
+    utils.reset_dir(path)
     return path
 
 

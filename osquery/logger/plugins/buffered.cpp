@@ -12,7 +12,6 @@
 #include <chrono>
 #include <thread>
 
-#include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 
 #include <osquery/database.h>
@@ -22,6 +21,7 @@
 #include <osquery/system.h>
 
 #include "osquery/config/parsers/decorators.h"
+#include "osquery/core/json.h"
 #include "osquery/logger/plugins/buffered.h"
 
 namespace pt = boost::property_tree;
@@ -33,7 +33,8 @@ FLAG(uint64,
      1000000,
      "Maximum number of logs in buffered output plugins (0 = unlimited)");
 
-const auto BufferedLogForwarder::kLogPeriod = std::chrono::seconds(4);
+const std::chrono::seconds BufferedLogForwarder::kLogPeriod =
+    std::chrono::seconds(4);
 const size_t BufferedLogForwarder::kMaxLogLines = 1024;
 
 Status BufferedLogForwarder::setUp() {
@@ -123,8 +124,8 @@ void BufferedLogForwarder::purge() {
                << ") exceeded: " << buffer_count_;
 
   std::vector<std::string> status_indexes;
-  status = scanDatabaseKeys(kLogs, status_indexes, genIndexPrefix(false),
-                            purge_count);
+  status = scanDatabaseKeys(
+      kLogs, status_indexes, genIndexPrefix(false), purge_count);
   if (!status.ok()) {
     LOG(ERROR) << "Error scanning DB during buffered log purge";
     return;
@@ -141,12 +142,16 @@ void BufferedLogForwarder::purge() {
   size_t prefix_size = genIndexPrefix(true).size();
   // Partition the indexes so that the first purge_count elements are the
   // oldest indexes (the ones to be purged)
-  std::nth_element(indexes.begin(), indexes.begin() + purge_count - 1,
+  std::nth_element(indexes.begin(),
+                   indexes.begin() + purge_count - 1,
                    indexes.end(),
                    [&](const std::string& a, const std::string& b) {
                      // Skip the prefix when doing comparisons
-                     return a.compare(prefix_size, std::string::npos, b,
-                                      prefix_size, std::string::npos) < 0;
+                     return a.compare(prefix_size,
+                                      std::string::npos,
+                                      b,
+                                      prefix_size,
+                                      std::string::npos) < 0;
                    });
   indexes.erase(indexes.begin() + purge_count, indexes.end());
 
@@ -156,7 +161,6 @@ void BufferedLogForwarder::purge() {
       LOG(ERROR) << "Error deleting value during buffered log purge";
     }
   });
-
 }
 
 void BufferedLogForwarder::start() {

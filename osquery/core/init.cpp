@@ -17,6 +17,10 @@
 #include <time.h>
 
 #ifdef WIN32
+#define _WIN32_DCOM
+#define WIN32_LEAN_AND_MEAN
+#include <WbemIdl.h>
+#include <Windows.h>
 #include <signal.h>
 #else
 #include <unistd.h>
@@ -35,8 +39,8 @@
 #include <osquery/registry.h>
 #include <osquery/system.h>
 
-#include "osquery/core/watcher.h"
 #include "osquery/core/process.h"
+#include "osquery/core/watcher.h"
 
 #if defined(__linux__) || defined(__FreeBSD__)
 #include <sys/resource.h>
@@ -70,40 +74,40 @@ enum {
 };
 #endif
 
-#define DESCRIPTION \
+#define DESCRIPTION                                                            \
   "osquery %s, your OS as a high-performance relational database\n"
 #define EPILOG "\nosquery project page <https://osquery.io>.\n"
-#define OPTIONS \
+#define OPTIONS                                                                \
   "\nosquery configuration options (set by config or CLI flags):\n\n"
 #define OPTIONS_SHELL "\nosquery shell-only CLI flags:\n\n"
 #define OPTIONS_CLI "osquery%s command line flags:\n\n"
 #define USAGE "Usage: %s [OPTION]... %s\n\n"
-#define CONFIG_ERROR                                                          \
-  "You are using default configurations for osqueryd for one or more of the " \
-  "following\n"                                                               \
-  "flags: pidfile, db_path.\n\n"                                              \
-  "These options create files in " OSQUERY_HOME                               \
-  " but it looks like that path "                                             \
-  "has not\n"                                                                 \
-  "been created. Please consider explicitly defining those "                  \
-  "options as a different \n"                                                 \
-  "path. Additionally, review the \"using osqueryd\" wiki page:\n"            \
-  " - https://osquery.readthedocs.org/en/latest/introduction/using-osqueryd/" \
+#define CONFIG_ERROR                                                           \
+  "You are using default configurations for osqueryd for one or more of the "  \
+  "following\n"                                                                \
+  "flags: pidfile, db_path.\n\n"                                               \
+  "These options create files in " OSQUERY_HOME                                \
+  " but it looks like that path "                                              \
+  "has not\n"                                                                  \
+  "been created. Please consider explicitly defining those "                   \
+  "options as a different \n"                                                  \
+  "path. Additionally, review the \"using osqueryd\" wiki page:\n"             \
+  " - https://osquery.readthedocs.org/en/latest/introduction/using-osqueryd/"  \
   "\n\n";
 
 /// Seconds to alarm and quit for non-responsive event loops.
 #define SIGNAL_ALARM_TIMEOUT 4
 
-/// For Windows, SIGILL and SIGTERM 
+/// For Windows, SIGILL and SIGTERM
 #ifdef WIN32
 
 /// We define SIGHUP similarly to POSIX because otherwise it would require a
 /// complex ifndef
-#define SIGHUP   1
+#define SIGHUP 1
 
 /// For Windows, SIGILL and SIGTERM are not generated signals. To supplant the
 /// SIGUSR1 use-case on POSIX, we use SIGILL.
-#define SIGUSR1  SIGILL
+#define SIGUSR1 SIGILL
 
 #endif
 
@@ -183,16 +187,18 @@ using chrono_clock = std::chrono::high_resolution_clock;
 
 namespace fs = boost::filesystem;
 
+DECLARE_string(flagfile);
+
 namespace osquery {
 
-DECLARE_string(distributed_plugin);
-DECLARE_bool(disable_distributed);
 DECLARE_string(config_plugin);
 DECLARE_bool(config_check);
 DECLARE_bool(config_dump);
-DECLARE_bool(disable_database);
 DECLARE_bool(database_dump);
 DECLARE_string(database_path);
+DECLARE_string(distributed_plugin);
+DECLARE_bool(disable_distributed);
+DECLARE_bool(disable_database);
 DECLARE_bool(disable_events);
 
 #if !defined(__APPLE__) && !defined(WIN32)
@@ -201,58 +207,26 @@ CLI_FLAG(bool, daemonize, false, "Run as daemon (osqueryd only)");
 
 FLAG(bool, ephemeral, false, "Skip pidfile and database state checks");
 
-ToolType kToolType = OSQUERY_TOOL_UNKNOWN;
+ToolType kToolType = ToolType::UNKNOWN;
 
 volatile std::sig_atomic_t kExitCode{0};
 
 /// The saved thread ID for shutdown to short-circuit raising a signal.
 static std::thread::id kMainThreadId;
 
-using InitializerMap = std::map<std::string, InitializerInterface*>;
+const std::string kDefaultFlagfile = OSQUERY_HOME "/osquery.flags.default";
 
-InitializerMap& registry_initializer() {
-  static InitializerMap registry_;
-  return registry_;
-}
-
-InitializerMap& plugin_initializer() {
-  static InitializerMap plugin_;
-  return plugin_;
-}
-
-void registerRegistry(InitializerInterface* const item) {
-  if (item != nullptr) {
-    registry_initializer().insert({item->id(), item});
-  }
-}
-
-void registerPlugin(InitializerInterface* const item) {
-  if (item != nullptr) {
-    plugin_initializer().insert({item->id(), item});
-  }
-}
-
-void beginRegistryAndPluginInit() {
-  for (const auto& it : registry_initializer()) {
-    it.second->run();
-  }
-
-  for (const auto& it : plugin_initializer()) {
-    it.second->run();
-  }
-}
-
-void printUsage(const std::string& binary, int tool) {
+static inline void printUsage(const std::string& binary, ToolType tool) {
   // Parse help options before gflags. Only display osquery-related options.
   fprintf(stdout, DESCRIPTION, kVersion.c_str());
-  if (tool == OSQUERY_TOOL_SHELL) {
+  if (tool == ToolType::SHELL) {
     // The shell allows a caller to run a single SQL statement and exit.
     fprintf(stdout, USAGE, binary.c_str(), "[SQL STATEMENT]");
   } else {
     fprintf(stdout, USAGE, binary.c_str(), "");
   }
 
-  if (tool == OSQUERY_EXTENSION) {
+  if (tool == ToolType::EXTENSION) {
     fprintf(stdout, OPTIONS_CLI, " extension");
     Flag::printFlags(false, true);
   } else {
@@ -262,7 +236,7 @@ void printUsage(const std::string& binary, int tool) {
     Flag::printFlags();
   }
 
-  if (tool == OSQUERY_TOOL_SHELL) {
+  if (tool == ToolType::SHELL) {
     // Print shell flags.
     fprintf(stdout, OPTIONS_SHELL);
     Flag::printFlags(true);
@@ -271,15 +245,35 @@ void printUsage(const std::string& binary, int tool) {
   fprintf(stdout, EPILOG);
 }
 
+void Initializer::platformSetup() {
+// Initialize the COM libraries utilized by Windows WMI calls.
+#ifdef WIN32
+  auto ret = ::CoInitializeEx(0, COINIT_MULTITHREADED);
+  if (ret != S_OK) {
+    ::CoUninitialize();
+  }
+#else
+#endif
+}
+
+void Initializer::platformTeardown() {
+// Before we shutdown, we must insure to free the COM libs in windows
+#ifdef WIN32
+  ::CoUninitialize();
+#else
+#endif
+}
+
 Initializer::Initializer(int& argc, char**& argv, ToolType tool)
     : argc_(&argc),
       argv_(&argv),
       tool_(tool),
-      binary_((tool == OSQUERY_TOOL_DAEMON) ? "osqueryd" : "osqueryi") {
-  std::srand(chrono_clock::now().time_since_epoch().count());
+      binary_((tool == ToolType::DAEMON) ? "osqueryd" : "osqueryi") {
+  std::srand(static_cast<unsigned int>(
+      chrono_clock::now().time_since_epoch().count()));
 
   // Initialize registries and plugins
-  beginRegistryAndPluginInit();
+  registryAndPluginInit();
 
   // The 'main' thread is that which executes the initializer.
   kMainThreadId = std::this_thread::get_id();
@@ -290,7 +284,7 @@ Initializer::Initializer(int& argc, char**& argv, ToolType tool)
   // See issue #1559 for the discussion and upstream boost patch.
   try {
     boost::filesystem::path::codecvt();
-  } catch (const std::runtime_error& e) {
+  } catch (const std::runtime_error& /* e */) {
 #ifdef WIN32
     setlocale(LC_ALL, "C");
 #else
@@ -303,25 +297,13 @@ Initializer::Initializer(int& argc, char**& argv, ToolType tool)
     auto help = std::string((*argv_)[i]);
     if ((help == "--help" || help == "-help" || help == "--h" ||
          help == "-h") &&
-        tool != OSQUERY_TOOL_TEST) {
+        tool != ToolType::TEST) {
       printUsage(binary_, tool_);
       shutdown();
     }
   }
 
-// To change the default config plugin, compile osquery with
-// -DOSQUERY_DEFAULT_CONFIG_PLUGIN=<new_default_plugin>
-#ifdef OSQUERY_DEFAULT_CONFIG_PLUGIN
-  FLAGS_config_plugin = STR(OSQUERY_DEFAULT_CONFIG_PLUGIN);
-#endif
-
-// To change the default logger plugin, compile osquery with
-// -DOSQUERY_DEFAULT_LOGGER_PLUGIN=<new_default_plugin>
-#ifdef OSQUERY_DEFAULT_LOGGER_PLUGIN
-  FLAGS_logger_plugin = STR(OSQUERY_DEFAULT_LOGGER_PLUGIN);
-#endif
-
-  if (tool == OSQUERY_TOOL_SHELL) {
+  if (tool == ToolType::SHELL) {
     // The shell is transient, rewrite config-loaded paths.
     FLAGS_disable_logging = true;
     // The shell never will not fork a worker.
@@ -329,15 +311,23 @@ Initializer::Initializer(int& argc, char**& argv, ToolType tool)
     FLAGS_disable_events = true;
   }
 
+  bool default_flags = false;
+  if (FLAGS_flagfile.empty() && isReadable(kDefaultFlagfile)) {
+    // No flagfile was set (daemons and services always set a flagfile).
+    default_flags = true;
+    FLAGS_flagfile = kDefaultFlagfile;
+  }
+
   // Set version string from CMake build
   GFLAGS_NAMESPACE::SetVersionString(kVersion.c_str());
 
   // Let gflags parse the non-help options/flags.
   GFLAGS_NAMESPACE::ParseCommandLineFlags(
-      argc_, argv_, (tool == OSQUERY_TOOL_SHELL));
+      argc_, argv_, (tool == ToolType::SHELL));
 
-  if (tool == OSQUERY_TOOL_SHELL) {
-    if (Flag::isDefault("database_path")) {
+  if (tool == ToolType::SHELL) {
+    if (Flag::isDefault("database_path") &&
+        Flag::isDefault("disable_database")) {
       // The shell should not use a database by default, but should use the DB
       // specified by database_path if it is set
       FLAGS_disable_database = true;
@@ -366,7 +356,7 @@ Initializer::Initializer(int& argc, char**& argv, ToolType tool)
 
   // Initialize the status and results logger.
   initStatusLogger(binary_);
-  if (tool != OSQUERY_EXTENSION) {
+  if (tool != ToolType::EXTENSION) {
     if (isWorker()) {
       VLOG(1) << "osquery worker initialized [watcher="
               << PlatformProcess::getLauncherProcess()->pid() << "]";
@@ -376,6 +366,13 @@ Initializer::Initializer(int& argc, char**& argv, ToolType tool)
   } else {
     VLOG(1) << "osquery extension initialized [sdk=" << kSDKVersion << "]";
   }
+
+  if (default_flags) {
+    VLOG(1) << "Using default flagfile: " << kDefaultFlagfile;
+  }
+
+  // Initialize the COM libs
+  platformSetup();
 }
 
 void Initializer::initDaemon() const {
@@ -427,20 +424,23 @@ void Initializer::initDaemon() const {
 void Initializer::initShell() const {
   // Get the caller's home dir for temporary storage/state management.
   auto homedir = osqueryHomeDirectory();
-  boost::system::error_code ec;
-  if (osquery::pathExists(homedir).ok() ||
-      boost::filesystem::create_directory(homedir, ec)) {
+  if (osquery::pathExists(homedir).ok()) {
     // Only apply user/shell-specific paths if not overridden by CLI flag.
     if (Flag::isDefault("database_path")) {
       osquery::FLAGS_database_path =
           (fs::path(homedir) / "shell.db").make_preferred().string();
     }
     if (Flag::isDefault("extensions_socket")) {
-      osquery::FLAGS_extensions_socket =
-          (fs::path(homedir) / "shell.em").make_preferred().string();
+      if (isPlatform(PlatformType::TYPE_WINDOWS)) {
+        osquery::FLAGS_extensions_socket = "\\\\.\\pipe\\shell.em";
+      } else {
+        osquery::FLAGS_extensions_socket =
+            (fs::path(homedir) / "shell.em").make_preferred().string();
+      }
     }
   } else {
-    LOG(INFO) << "Cannot access or create osquery home directory";
+    fprintf(
+        stderr, "Cannot access or create osquery home: %s", homedir.c_str());
     FLAGS_disable_extensions = true;
     FLAGS_disable_database = true;
   }
@@ -515,39 +515,31 @@ void Initializer::initWorkerWatcher(const std::string& name) const {
   }
 }
 
-bool Initializer::isWorker() { return hasWorkerVariable(); }
+bool Initializer::isWorker() {
+  return hasWorkerVariable();
+}
 
 void Initializer::initActivePlugin(const std::string& type,
                                    const std::string& name) const {
-  // Use a delay, meaning the amount of milliseconds waited for extensions.
-  size_t delay = 0;
-  // The timeout is the maximum milliseconds in seconds to wait for extensions.
-  size_t timeout = atoi(FLAGS_extensions_timeout.c_str()) * 1000000;
-  if (timeout < kExtensionInitializeLatencyUS * 10) {
-    timeout = kExtensionInitializeLatencyUS * 10;
-  }
-
-  // Attempt to set the request plugin as active.
-  Status status;
-  do {
-    status = Registry::setActive(type, name);
-    if (status.ok()) {
-      // The plugin was found, and is not active.
-      return;
+  auto status = applyExtensionDelay(([type, name](bool& stop) {
+    auto rs = Registry::setActive(type, name);
+    if (rs.ok()) {
+      // The plugin was found, and is now active.
+      return rs;
     }
 
     if (!Watcher::hasManagedExtensions()) {
-      // The plugin was found locally, and is not active, problem.
-      break;
+      // The plugin must be local, and is not active, problem.
+      stop = true;
     }
-    // The plugin is not local and is not active, wait and retry.
-    delay += kExtensionInitializeLatencyUS;
-    sleepFor(kExtensionInitializeLatencyUS / 1000);
-  } while (delay < timeout);
+    return rs;
+  }));
 
-  LOG(ERROR) << "Cannot activate " << name << " " << type
-             << " plugin: " << status.getMessage();
-  requestShutdown(EXIT_CATASTROPHIC);
+  if (!status.ok()) {
+    LOG(ERROR) << "Cannot activate " << name << " " << type
+               << " plugin: " << status.getMessage();
+    requestShutdown(EXIT_CATASTROPHIC);
+  }
 }
 
 void Initializer::start() const {
@@ -568,7 +560,7 @@ void Initializer::start() const {
   if (!isWatcher()) {
     DatabasePlugin::setAllowOpen(true);
     // A daemon must always have R/W access to the database.
-    DatabasePlugin::setRequireWrite(tool_ == OSQUERY_TOOL_DAEMON);
+    DatabasePlugin::setRequireWrite(tool_ == ToolType::DAEMON);
     if (!DatabasePlugin::initPlugin()) {
       LOG(ERROR) << RLOG(1629) << binary_
                  << " initialize failed: Could not initialize database";
@@ -608,7 +600,7 @@ void Initializer::start() const {
   auto s = Config::getInstance().load();
   if (!s.ok()) {
     auto message = "Error reading config: " + s.toString();
-    if (tool_ == OSQUERY_TOOL_DAEMON) {
+    if (tool_ == ToolType::DAEMON) {
       LOG(WARNING) << message;
     } else {
       LOG(INFO) << message;
@@ -621,14 +613,10 @@ void Initializer::start() const {
   }
   initLogger(binary_);
 
-#ifndef WIN32
   // Initialize the distributed plugin, if necessary
   if (!FLAGS_disable_distributed) {
-    if (Registry::exists("distributed", FLAGS_distributed_plugin)) {
-      initActivePlugin("distributed", FLAGS_distributed_plugin);
-    }
+    initActivePlugin("distributed", FLAGS_distributed_plugin);
   }
-#endif
 
   // Start event threads.
   osquery::attachEvents();
@@ -667,5 +655,8 @@ void Initializer::requestShutdown(int retcode, const std::string& system_log) {
   requestShutdown(retcode);
 }
 
-void Initializer::shutdown(int retcode) { ::exit(retcode); }
+void Initializer::shutdown(int retcode) {
+  platformTeardown();
+  ::exit(retcode);
+}
 }

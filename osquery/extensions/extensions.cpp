@@ -10,6 +10,7 @@
 
 #include <csignal>
 
+#include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/trim.hpp>
 
 #include <osquery/core.h>
@@ -23,6 +24,7 @@
 #include "osquery/core/process.h"
 #include "osquery/core/watcher.h"
 #include "osquery/extensions/interface.h"
+#include "osquery/filesystem/fileops.h"
 
 using namespace osquery::extensions;
 
@@ -31,36 +33,35 @@ namespace fs = boost::filesystem;
 namespace osquery {
 
 // Millisecond latency between initalizing manager pings.
-const size_t kExtensionInitializeLatencyUS = 20000;
+const size_t kExtensionInitializeLatency = 20;
 
-#ifdef __APPLE__
-#define MODULE_EXTENSION ".dylib"
-#elif defined(WIN32)
-#define MODULE_EXTENSION ".dll"
-#else
-#define MODULE_EXTENSION ".so"
-#endif
-
-enum ExtenableTypes {
+enum class ExtendableType {
   EXTENSION = 1,
   MODULE = 2,
 };
 
-const std::map<ExtenableTypes, std::string> kExtendables = {
-    {EXTENSION, ".ext"}, {MODULE, MODULE_EXTENSION},
+using ExtendableTypeSet = std::map<ExtendableType, std::string>;
+
+const std::map<PlatformType, ExtendableTypeSet> kFileExtensions{
+    {PlatformType::TYPE_WINDOWS,
+     {{ExtendableType::EXTENSION, ".exe"}, {ExtendableType::MODULE, ".dll"}}},
+    {PlatformType::TYPE_LINUX,
+     {{ExtendableType::EXTENSION, ".ext"}, {ExtendableType::MODULE, ".so"}}},
+    {PlatformType::TYPE_OSX,
+     {{ExtendableType::EXTENSION, ".ext"}, {ExtendableType::MODULE, ".dylib"}}},
 };
 
 CLI_FLAG(bool, disable_extensions, false, "Disable extension API");
 
 CLI_FLAG(string,
          extensions_socket,
-         OSQUERY_DB_HOME "/osquery.em",
-         "Path to the extensions UNIX domain socket")
+         OSQUERY_SOCKET "osquery.em",
+         "Path to the extensions UNIX domain socket");
 
 CLI_FLAG(string,
          extensions_autoload,
          OSQUERY_HOME "/extensions.load",
-         "Optional path to a list of autoloaded & managed extensions")
+         "Optional path to a list of autoloaded & managed extensions");
 
 CLI_FLAG(string,
          extensions_timeout,
@@ -70,12 +71,19 @@ CLI_FLAG(string,
 CLI_FLAG(string,
          extensions_interval,
          "3",
-         "Seconds delay between connectivity checks")
+         "Seconds delay between connectivity checks");
 
 CLI_FLAG(string,
          modules_autoload,
          OSQUERY_HOME "/modules.load",
-         "Optional path to a list of autoloaded registry modules")
+         "Optional path to a list of autoloaded registry modules");
+
+SHELL_FLAG(string, extension, "", "Path to a single extension to autoload");
+
+CLI_FLAG(string,
+         extensions_require,
+         "",
+         "Comma-separated list of required extensions");
 
 /**
  * @brief Alias the extensions_socket (used by core) to a simple 'socket'.
@@ -89,6 +97,50 @@ CLI_FLAG(string,
 EXTENSION_FLAG_ALIAS(socket, extensions_socket);
 EXTENSION_FLAG_ALIAS(timeout, extensions_timeout);
 EXTENSION_FLAG_ALIAS(interval, extensions_interval);
+
+Status applyExtensionDelay(std::function<Status(bool& stop)> predicate) {
+  // Make sure the extension manager path exists, and is writable.
+  size_t delay = 0;
+  // The timeout is given in seconds, but checked interval is microseconds.
+  size_t timeout = atoi(FLAGS_extensions_timeout.c_str()) * 1000;
+  if (timeout < kExtensionInitializeLatency * 10) {
+    timeout = kExtensionInitializeLatency * 10;
+  }
+
+  Status status;
+  do {
+    bool stop = false;
+    status = predicate(stop);
+    if (stop || status.ok()) {
+      break;
+    }
+
+    // Increase the total wait detail.
+    delay += kExtensionInitializeLatency;
+    sleepFor(kExtensionInitializeLatency);
+  } while (delay < timeout);
+  return status;
+}
+
+Status extensionPathActive(const std::string& path, bool use_timeout = false) {
+  return applyExtensionDelay(([path, &use_timeout](bool& stop) {
+    if (socketExists(path)) {
+      try {
+        ExtensionStatus status;
+        auto client = EXManagerClient(path);
+        client.get()->ping(status);
+        return Status(0, "OK");
+      } catch (const std::exception& /* e */) {
+        // Path might exist without a connected extension or extension manager.
+      }
+    }
+    // Only check active once if this check does not allow a timeout.
+    if (!use_timeout) {
+      stop = true;
+    }
+    return Status(1, "Extension socket not available: " + path);
+  }));
+}
 
 void ExtensionWatcher::start() {
   // Watch the manager, if the socket is removed then the extension will die.
@@ -114,7 +166,7 @@ void ExtensionManagerWatcher::start() {
       auto path = getExtensionSocket(uuid);
       auto client = EXClient(path);
       client.get()->shutdown();
-    } catch (const std::exception& e) {
+    } catch (const std::exception& /* e */) {
       VLOG(1) << "Extension UUID " << uuid << " shutdown request failed";
       continue;
     }
@@ -133,12 +185,12 @@ void ExtensionWatcher::watch() {
   // This does NOT use pingExtension to avoid the latency checks applied.
   ExtensionStatus status;
   bool core_sane = true;
-  if (isWritable(path_)) {
+  if (socketExists(path_)) {
     try {
       auto client = EXManagerClient(path_);
       // Ping the extension manager until it goes down.
       client.get()->ping(status);
-    } catch (const std::exception& e) {
+    } catch (const std::exception& /* e */) {
       core_sane = false;
     }
   } else {
@@ -165,18 +217,30 @@ void ExtensionManagerWatcher::watch() {
   ExtensionStatus status;
   for (const auto& uuid : uuids) {
     auto path = getExtensionSocket(uuid);
-    if (isWritable(path)) {
+    auto exists = socketExists(path);
+
+    if (!exists.ok() && failures_[uuid] == 0) {
+      // If there was never a failure then this is the first attempt.
+      // Allow the extension to be latent and respect the autoload timeout.
+      VLOG(1) << "Extension UUID " << uuid << " initial check failed";
+      exists = extensionPathActive(path, true);
+    }
+
+    // All extensions will have a single failure (and odd use of the counting).
+    // If failures get to 2 then the extension will be removed.
+    failures_[uuid] = 1;
+    if (exists.ok()) {
       try {
         auto client = EXClient(path);
         // Ping the extension until it goes down.
         client.get()->ping(status);
-      } catch (const std::exception& e) {
+      } catch (const std::exception& /* e */) {
         failures_[uuid] += 1;
         continue;
       }
     } else {
       // Immediate fail non-writable paths.
-      failures_[uuid] = 3;
+      failures_[uuid] += 1;
       continue;
     }
 
@@ -184,38 +248,17 @@ void ExtensionManagerWatcher::watch() {
       LOG(INFO) << "Extension UUID " << uuid << " ping failed";
       failures_[uuid] += 1;
     } else {
-      failures_[uuid] = 0;
+      failures_[uuid] = 1;
     }
   }
 
   for (const auto& uuid : failures_) {
-    if (uuid.second >= 3) {
+    if (uuid.second > 1) {
       LOG(INFO) << "Extension UUID " << uuid.first << " has gone away";
       Registry::removeBroadcast(uuid.first);
-      failures_[uuid.first] = 0;
+      failures_[uuid.first] = 1;
     }
   }
-}
-
-Status socketWritable(const fs::path& path) {
-  if (pathExists(path).ok()) {
-    if (!isWritable(path).ok()) {
-      return Status(1, "Cannot write extension socket: " + path.string());
-    }
-
-    if (!osquery::remove(path).ok()) {
-      return Status(1, "Cannot remove extension socket: " + path.string());
-    }
-  } else {
-    if (!pathExists(path.parent_path()).ok()) {
-      return Status(1, "Extension socket directory missing: " + path.string());
-    }
-
-    if (!isWritable(path.parent_path()).ok()) {
-      return Status(1, "Cannot create extension socket: " + path.string());
-    }
-  }
-  return Status(0, "OK");
 }
 
 void loadExtensions() {
@@ -234,6 +277,11 @@ void loadExtensions() {
 }
 
 void loadModules() {
+  if (isPlatform(PlatformType::TYPE_WINDOWS)) {
+    VLOG(1) << "Windows does not support loadable modules";
+    return;
+  }
+
   auto status =
       loadModules(fs::path(FLAGS_modules_autoload).make_preferred().string());
   if (!status.ok()) {
@@ -241,10 +289,11 @@ void loadModules() {
   }
 }
 
-static bool isFileSafe(std::string& path, ExtenableTypes type) {
+static bool isFileSafe(std::string& path, ExtendableType type) {
   boost::trim(path);
   // A 'type name' may be used in verbose log output.
-  std::string type_name = ((type == EXTENSION) ? "extension" : "module");
+  std::string type_name =
+      ((type == ExtendableType::EXTENSION) ? "extension" : "module");
   if (path.size() == 0 || path[0] == '#' || path[0] == ';') {
     return false;
   }
@@ -254,8 +303,15 @@ static bool isFileSafe(std::string& path, ExtenableTypes type) {
     VLOG(1) << "Cannot autoload " << type_name << " from directory: " << path;
     return false;
   }
-  // The extendables will force an appropriate file path extension.
-  auto& ext = kExtendables.at(type);
+
+  std::string ext;
+  if (isPlatform(PlatformType::TYPE_LINUX)) {
+    ext = kFileExtensions.at(PlatformType::TYPE_LINUX).at(type);
+  } else if (isPlatform(PlatformType::TYPE_OSX)) {
+    ext = kFileExtensions.at(PlatformType::TYPE_OSX).at(type);
+  } else {
+    ext = kFileExtensions.at(PlatformType::TYPE_WINDOWS).at(type);
+  }
 
   // Only autoload file which were safe at the time of discovery.
   // If the binary later becomes unsafe (permissions change) then it will fail
@@ -280,65 +336,73 @@ static bool isFileSafe(std::string& path, ExtenableTypes type) {
 }
 
 Status loadExtensions(const std::string& loadfile) {
-  std::string autoload_paths;
-  if (readFile(loadfile, autoload_paths).ok()) {
-    for (auto& path : osquery::split(autoload_paths, "\n")) {
-      if (isFileSafe(path, EXTENSION)) {
-        // After the path is sanitized the watcher becomes responsible for
-        // forking and executing the extension binary.
-        Watcher::addExtensionPath(path);
-      }
-    }
-    return Status(0, "OK");
+  if (!FLAGS_extension.empty()) {
+    // This is a shell-only development flag for quickly loading/using a single
+    // extension. It bypasses the safety check.
+    Watcher::addExtensionPath(FLAGS_extension);
   }
-  return Status(1, "Failed reading: " + loadfile);
+
+  std::string autoload_paths;
+  if (!readFile(loadfile, autoload_paths).ok()) {
+    return Status(1, "Failed reading: " + loadfile);
+  }
+
+  // The set of binaries to auto-load, after safety is confirmed.
+  std::set<std::string> autoload_binaries;
+  for (auto& path : osquery::split(autoload_paths, "\n")) {
+    if (isDirectory(path)) {
+      std::vector<std::string> paths;
+      listFilesInDirectory(path, paths, true);
+      for (auto& embedded_path : paths) {
+        if (isFileSafe(embedded_path, ExtendableType::EXTENSION)) {
+          autoload_binaries.insert(std::move(embedded_path));
+        }
+      }
+    } else if (isFileSafe(path, ExtendableType::EXTENSION)) {
+      autoload_binaries.insert(path);
+    }
+  }
+
+  for (const auto& binary : autoload_binaries) {
+    // After the path is sanitized the watcher becomes responsible for
+    // forking and executing the extension binary.
+    Watcher::addExtensionPath(binary);
+  }
+  return Status(0, "OK");
 }
 
 Status loadModules(const std::string& loadfile) {
-  // Split the search path for modules using a ':' delimiter.
-  bool all_loaded = true;
   std::string autoload_paths;
-  if (readFile(loadfile, autoload_paths).ok()) {
-    for (auto& path : osquery::split(autoload_paths, "\n")) {
-      if (isFileSafe(path, MODULE)) {
-        RegistryModuleLoader loader(path);
-        loader.init();
-      } else {
-        all_loaded = false;
-      }
-    }
-    // Return an aggregate failure if any load fails (invalid search path).
-    return Status((all_loaded) ? 0 : 1);
+  if (!readFile(loadfile, autoload_paths).ok()) {
+    return Status(1, "Failed reading: " + loadfile);
   }
-  return Status(1, "Failed reading: " + loadfile);
-}
 
-Status extensionPathActive(const std::string& path, bool use_timeout = false) {
-  // Make sure the extension manager path exists, and is writable.
-  size_t delay = 0;
-  // The timeout is given in seconds, but checked interval is microseconds.
-  size_t timeout = atoi(FLAGS_extensions_timeout.c_str()) * 1000000;
-  if (timeout < kExtensionInitializeLatencyUS * 10) {
-    timeout = kExtensionInitializeLatencyUS * 10;
-  }
-  do {
-    if (pathExists(path) && isWritable(path)) {
-      try {
-        auto client = EXManagerClient(path);
-        return Status(0, "OK");
-      } catch (const std::exception& e) {
-        // Path might exist without a connected extension or extension manager.
+  bool all_loaded = true;
+  std::set<std::string> autoload_objects;
+  for (auto& path : osquery::split(autoload_paths, "\n")) {
+    if (isDirectory(path)) {
+      std::vector<std::string> paths;
+      listFilesInDirectory(path, paths, true);
+      for (auto& embedded_path : paths) {
+        if (isFileSafe(embedded_path, ExtendableType::MODULE)) {
+          autoload_objects.insert(std::move(embedded_path));
+        } else {
+          all_loaded = false;
+        }
       }
+    } else if (isFileSafe(path, ExtendableType::MODULE)) {
+      autoload_objects.insert(path);
+    } else {
+      all_loaded = false;
     }
-    // Only check active once if this check does not allow a timeout.
-    if (!use_timeout || timeout == 0) {
-      break;
-    }
-    // Increase the total wait detail.
-    delay += kExtensionInitializeLatencyUS;
-    sleepFor(kExtensionInitializeLatencyUS / 1000);
-  } while (delay < timeout);
-  return Status(1, "Extension socket not available: " + path);
+  }
+
+  for (const auto& object : autoload_objects) {
+    RegistryModuleLoader loader(object);
+    loader.init();
+  }
+  // Return an aggregate failure if any load fails (invalid search path).
+  return Status((all_loaded) ? 0 : 1);
 }
 
 Status startExtension(const std::string& name, const std::string& version) {
@@ -348,7 +412,10 @@ Status startExtension(const std::string& name, const std::string& version) {
 Status startExtension(const std::string& name,
                       const std::string& version,
                       const std::string& min_sdk_version) {
+  // Tell the registry that this is an extension.
+  // When a broadcast is requested this registry should not send core plugins.
   Registry::setExternal();
+
   // Latency converted to milliseconds, used as a thread interruptible.
   auto latency = atoi(FLAGS_extensions_interval.c_str()) * 1000;
   auto status = startExtensionWatcher(FLAGS_extensions_socket, latency, true);
@@ -406,9 +473,10 @@ Status startExtension(const std::string& manager_path,
     return Status(1, "Extension register failed: " + std::string(e.what()));
   }
 
-  // Now that the uuid is known, try to clean up stale socket paths.
+  // Now that the UUID is known, try to clean up stale socket paths.
   auto extension_path = getExtensionSocket(ext_status.uuid, manager_path);
-  status = socketWritable(extension_path);
+
+  status = socketExists(extension_path, true);
   if (!status) {
     return status;
   }
@@ -417,6 +485,7 @@ Status startExtension(const std::string& manager_path,
   // plugins are not available in the extension's local registry.
   Registry::setActive("config", options["config_plugin"].value);
   Registry::setActive("logger", options["logger_plugin"].value);
+  Registry::setActive("distributed", options["distributed_plugin"].value);
   // Set up all lazy registry plugins and the active config/logger plugin.
   Registry::setUp();
 
@@ -476,8 +545,8 @@ Status getQueryColumnsExternal(const std::string& manager_path,
   // Translate response map: {string: string} to a vector: pair(name, type).
   for (const auto& column : response.response) {
     for (const auto& col : column) {
-      columns.push_back(
-          std::make_tuple(col.first, columnTypeName(col.second), DEFAULT));
+      columns.push_back(std::make_tuple(
+          col.first, columnTypeName(col.second), ColumnOptions::DEFAULT));
     }
   }
 
@@ -539,7 +608,8 @@ Status getExtensions(const std::string& manager_path,
 
   // Convert from Thrift-internal list type to RouteUUID/ExtenionInfo type.
   for (const auto& ext : ext_list) {
-    extensions[ext.first] = {ext.second.name, ext.second.version,
+    extensions[ext.first] = {ext.second.name,
+                             ext.second.version,
                              ext.second.min_sdk_version,
                              ext.second.sdk_version};
   }
@@ -580,8 +650,8 @@ Status callExtension(const std::string& extension_path,
 
   // Convert from Thrift-internal list type to PluginResponse type.
   if (ext_response.status.code == ExtensionCode::EXT_SUCCESS) {
-    for (const auto& item : ext_response.response) {
-      response.push_back(item);
+    for (const auto& response_item : ext_response.response) {
+      response.push_back(response_item);
     }
   }
   return Status(ext_response.status.code, ext_response.status.message);
@@ -596,7 +666,7 @@ Status startExtensionWatcher(const std::string& manager_path,
     return status;
   }
 
-  // Start a extension manager watcher, if the manager dies, so should we.
+  // Start a extension watcher, if the manager dies, so should we.
   Dispatcher::addService(
       std::make_shared<ExtensionWatcher>(manager_path, interval, fatal));
   return Status(0, "OK");
@@ -606,26 +676,58 @@ Status startExtensionManager() {
   if (FLAGS_disable_extensions) {
     return Status(1, "Extensions disabled");
   }
-  return startExtensionManager(
-      fs::path(FLAGS_extensions_socket).make_preferred().string());
+  return startExtensionManager(FLAGS_extensions_socket);
 }
 
 Status startExtensionManager(const std::string& manager_path) {
-  // Check if the socket location exists.
-  auto status = socketWritable(manager_path);
+  // Check if the socket location is ready for a new Thrift server.
+  // We expect the path to be invalid or a removal attempt to succeed.
+  auto status = socketExists(manager_path, true);
   if (!status.ok()) {
     return status;
   }
 
   // Seconds converted to milliseconds, used as a thread interruptible.
   auto latency = atoi(FLAGS_extensions_interval.c_str()) * 1000;
-  // Start a extension manager watcher, if the manager dies, so should we.
+  // Start a extension manager watcher, to monitor all registered extensions.
   Dispatcher::addService(
       std::make_shared<ExtensionManagerWatcher>(manager_path, latency));
 
   // Start the extension manager thread.
   Dispatcher::addService(
       std::make_shared<ExtensionManagerRunner>(manager_path));
+
+  // The shell or daemon flag configuration may require an extension.
+  if (!FLAGS_extensions_require.empty()) {
+    bool waited = false;
+    auto extensions = osquery::split(FLAGS_extensions_require, ",");
+    for (const auto& extension : extensions) {
+      status = applyExtensionDelay(([extension, &waited](bool& stop) {
+        ExtensionList registered_extensions;
+        if (getExtensions(registered_extensions).ok()) {
+          for (const auto& existing : registered_extensions) {
+            if (existing.second.name == extension) {
+              return pingExtension(getExtensionSocket(existing.first));
+            }
+          }
+        }
+
+        if (waited) {
+          // If we have already waited for the timeout period, stop early.
+          stop = true;
+        }
+        return Status(1, "Extension not autoloaded: " + extension);
+      }));
+
+      // A required extension was not loaded.
+      waited = true;
+      if (!status.ok()) {
+        LOG(WARNING) << status.getMessage();
+        return status;
+      }
+    }
+  }
+
   return Status(0, "OK");
 }
 }

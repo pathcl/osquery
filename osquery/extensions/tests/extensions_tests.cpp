@@ -21,30 +21,43 @@
 #include <osquery/filesystem.h>
 
 #include "osquery/core/process.h"
-#include "osquery/tests/test_util.h"
 #include "osquery/extensions/interface.h"
+#include "osquery/filesystem/fileops.h"
+#include "osquery/tests/test_util.h"
 
 using namespace osquery::extensions;
 
 namespace osquery {
 
-const int kDelayUS = 2000;
-const int kTimeoutUS = 1000000;
+const int kDelay = 20;
+const int kTimeout = 3000;
 
 class ExtensionsTest : public testing::Test {
  protected:
-  void SetUp() {
-    socket_path = kTestWorkingDirectory + "test.em" + std::to_string(rand());
-    remove(socket_path);
-    if (pathExists(socket_path).ok()) {
-      throw std::domain_error("Cannot test sockets: " + socket_path);
+  void SetUp() override {
+    if (isPlatform(PlatformType::TYPE_WINDOWS)) {
+      socket_path = OSQUERY_SOCKET;
+    } else {
+      socket_path = kTestWorkingDirectory;
+    }
+
+    socket_path += "testextmgr" + std::to_string(rand());
+
+    if (!isPlatform(PlatformType::TYPE_WINDOWS)) {
+      remove(socket_path);
+      if (pathExists(socket_path)) {
+        throw std::domain_error("Cannot test sockets: " + socket_path);
+      }
     }
   }
 
-  void TearDown() {
+  void TearDown() override {
     Dispatcher::stopServices();
     Dispatcher::joinServices();
-    remove(socket_path);
+
+    if (!isPlatform(PlatformType::TYPE_WINDOWS)) {
+      remove(socket_path);
+    }
   }
 
   bool ping(int attempts = 3) {
@@ -55,8 +68,8 @@ class ExtensionsTest : public testing::Test {
         EXManagerClient client(socket_path);
         client.get()->ping(status);
         return (status.code == ExtensionCode::EXT_SUCCESS);
-      } catch (const std::exception& e) {
-        sleepFor(kDelayUS / 1000);
+      } catch (const std::exception& /* e */) {
+        sleepFor(kDelay);
       }
     }
 
@@ -70,8 +83,8 @@ class ExtensionsTest : public testing::Test {
       try {
         EXManagerClient client(socket_path);
         client.get()->query(response, sql);
-      } catch (const std::exception& e) {
-        sleepFor(kDelayUS / 1000);
+      } catch (const std::exception& /* e */) {
+        sleepFor(kDelay);
       }
     }
 
@@ -94,15 +107,15 @@ class ExtensionsTest : public testing::Test {
     return extensions;
   }
 
-  bool socketExists(const std::string& socket_path) {
+  bool socketExistsLocal(const std::string& check_path) {
     // Wait until the runnable/thread created the socket.
     int delay = 0;
-    while (delay < kTimeoutUS) {
-      if (pathExists(socket_path).ok() && isReadable(socket_path).ok()) {
+    while (delay < kTimeout) {
+      if (osquery::socketExists(check_path).ok()) {
         return true;
       }
-      sleepFor(kDelayUS / 1000);
-      delay += kDelayUS;
+      sleepFor(kDelay);
+      delay += kDelay;
     }
     return false;
   }
@@ -116,14 +129,14 @@ TEST_F(ExtensionsTest, test_manager_runnable) {
   auto status = startExtensionManager(socket_path);
   EXPECT_TRUE(status.ok());
   // Call success if the Unix socket was created.
-  EXPECT_TRUE(socketExists(socket_path));
+  EXPECT_TRUE(socketExistsLocal(socket_path));
 }
 
 TEST_F(ExtensionsTest, test_extension_runnable) {
   auto status = startExtensionManager(socket_path);
   EXPECT_TRUE(status.ok());
   // Wait for the extension manager to start.
-  EXPECT_TRUE(socketExists(socket_path));
+  EXPECT_TRUE(socketExistsLocal(socket_path));
 
   // Test the extension manager API 'ping' call.
   EXPECT_TRUE(ping());
@@ -132,21 +145,26 @@ TEST_F(ExtensionsTest, test_extension_runnable) {
 TEST_F(ExtensionsTest, test_extension_start) {
   auto status = startExtensionManager(socket_path);
   EXPECT_TRUE(status.ok());
-  EXPECT_TRUE(socketExists(socket_path));
+  EXPECT_TRUE(socketExistsLocal(socket_path));
 
   // Now allow duplicates (for testing, since EM/E are the same).
   Registry::allowDuplicates(true);
-  status = startExtension(socket_path, "test", "0.1", "0.0.0", "0.0.1");
+  status = startExtension(socket_path, "test", "0.1", "0.0.0", "9.9.9");
   // This will not be false since we are allowing deplicate items.
   // Otherwise, starting an extension and extensionManager would fatal.
   ASSERT_TRUE(status.ok());
+
+  // Checks for version comparisons (also used by packs).
+  ASSERT_FALSE(versionAtLeast("1.1.1", "0.0.1"));
+  ASSERT_TRUE(versionAtLeast("1.1.1", "1.1.1"));
+  ASSERT_TRUE(versionAtLeast("1.1.1", "1.1.2"));
 
   // The `startExtension` internal call (exposed for testing) returns the
   // uuid of the extension in the success status.
   RouteUUID uuid = (RouteUUID)stoi(status.getMessage(), nullptr, 0);
 
   // We can test-wait for the extensions's socket to open.
-  EXPECT_TRUE(socketExists(socket_path + "." + std::to_string(uuid)));
+  EXPECT_TRUE(socketExistsLocal(socket_path + "." + std::to_string(uuid)));
 
   // Then clean up the registry modifications.
   Registry::removeBroadcast(uuid);
@@ -170,7 +188,7 @@ CREATE_REGISTRY(ExtensionPlugin, "extension_test");
 TEST_F(ExtensionsTest, test_extension_broadcast) {
   auto status = startExtensionManager(socket_path);
   EXPECT_TRUE(status.ok());
-  EXPECT_TRUE(socketExists(socket_path));
+  EXPECT_TRUE(socketExistsLocal(socket_path));
 
   // This time we're going to add a plugin to the extension_test registry.
   Registry::add<TestExtensionPlugin>("extension_test", "test_item");
@@ -188,19 +206,19 @@ TEST_F(ExtensionsTest, test_extension_broadcast) {
   EXPECT_TRUE(Registry::exists("extension_test", "test_item"));
   EXPECT_FALSE(Registry::exists("extension_test", "test_alias"));
 
-  status = startExtension(socket_path, "test", "0.1", "0.0.0", "0.0.1");
+  status = startExtension(socket_path, "test", "0.1", "0.0.0", "0.0.0");
   EXPECT_TRUE(status.ok());
 
   RouteUUID uuid;
   try {
     uuid = (RouteUUID)stoi(status.getMessage(), nullptr, 0);
-  } catch (const std::exception& e) {
+  } catch (const std::exception& /* e */) {
     EXPECT_TRUE(false);
     return;
   }
 
   auto ext_socket = socket_path + "." + std::to_string(uuid);
-  EXPECT_TRUE(socketExists(ext_socket));
+  EXPECT_TRUE(socketExistsLocal(ext_socket));
 
   // Make sure the EM registered the extension (called in start extension).
   auto extensions = registeredExtensions();
@@ -209,7 +227,7 @@ TEST_F(ExtensionsTest, test_extension_broadcast) {
   EXPECT_EQ(extensions.count(uuid), 1U);
   EXPECT_EQ(extensions.at(uuid).name, "test");
   EXPECT_EQ(extensions.at(uuid).version, "0.1");
-  EXPECT_EQ(extensions.at(uuid).sdk_version, "0.0.1");
+  EXPECT_EQ(extensions.at(uuid).sdk_version, "0.0.0");
 
   // We are broadcasting to our own registry in the test, which internally has
   // a "test_item" aliased to "test_alias", "test_item" is internally callable

@@ -8,21 +8,31 @@
  *
  */
 
-#include <vector>
 #include <string>
+#include <vector>
 
 #include <boost/algorithm/string/join.hpp>
 #include <boost/algorithm/string/predicate.hpp>
+#include <boost/filesystem/path.hpp>
 
 #include <osquery/core.h>
+#include <osquery/filesystem.h>
 #include <osquery/logger.h>
 #include <osquery/tables.h>
-#include <osquery/filesystem.h>
 
 #include "osquery/core/conversions.h"
+#include "osquery/filesystem/fileops.h"
+
+namespace fs = boost::filesystem;
 
 namespace osquery {
 namespace tables {
+
+#ifndef WIN32
+fs::path kEtcProtocols = "/etc/protocols";
+#else
+fs::path kEtcProtocols = (getSystemRoot() / "system32\\drivers\\etc\\protocol");
+#endif
 
 QueryData parseEtcProtocolsContent(const std::string& content) {
   QueryData results;
@@ -68,11 +78,11 @@ QueryData parseEtcProtocolsContent(const std::string& content) {
 
 QueryData genEtcProtocols(QueryContext& context) {
   std::string content;
-  auto s = readFile("/etc/protocols", content);
+  auto s = readFile(kEtcProtocols, content);
   if (s.ok()) {
     return parseEtcProtocolsContent(content);
   } else {
-    TLOG << "Error reading /etc/protocols: " << s.toString();
+    TLOG << "Error reading " << kEtcProtocols << ": " << s.toString();
     return {};
   }
 }

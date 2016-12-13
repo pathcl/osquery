@@ -22,7 +22,6 @@
 #include <boost/algorithm/string.hpp>
 #include <boost/filesystem/fstream.hpp>
 #include <boost/filesystem/operations.hpp>
-#include <boost/property_tree/json_parser.hpp>
 
 #include <osquery/core.h>
 #include <osquery/filesystem.h>
@@ -30,6 +29,7 @@
 #include <osquery/sql.h>
 #include <osquery/system.h>
 
+#include "osquery/core/json.h"
 #include "osquery/filesystem/fileops.h"
 
 namespace pt = boost::property_tree;
@@ -54,8 +54,8 @@ Status writeTextFile(const fs::path& path,
                      int permissions,
                      bool force_permissions) {
   // Open the file with the request permissions.
-  PlatformFile output_fd(path.string(), PF_CREATE_ALWAYS | PF_WRITE | PF_APPEND,
-                         permissions);
+  PlatformFile output_fd(
+      path.string(), PF_OPEN_ALWAYS | PF_WRITE | PF_APPEND, permissions);
   if (!output_fd.isValid()) {
     return Status(1, "Could not create file: " + path.string());
   }
@@ -75,57 +75,44 @@ Status writeTextFile(const fs::path& path,
   return Status(0, "OK");
 }
 
-struct OpenReadableFile {
+struct OpenReadableFile : private boost::noncopyable {
  public:
   explicit OpenReadableFile(const fs::path& path, bool blocking = false) {
-#ifndef WIN32
-    dropper_ = DropPrivileges::get();
-    if (dropper_->dropToParent(path)) {
-#endif
-      int mode = PF_OPEN_EXISTING | PF_READ;
-      if (!blocking) {
-        mode |= PF_NONBLOCK;
-      }
-
-      // Open the file descriptor and allow caller to perform error checking.
-      fd.reset(new PlatformFile(path.string(), mode));
-#ifndef WIN32
+    int mode = PF_OPEN_EXISTING | PF_READ;
+    if (!blocking) {
+      mode |= PF_NONBLOCK;
     }
-#endif
+
+    // Open the file descriptor and allow caller to perform error checking.
+    fd.reset(new PlatformFile(path.string(), mode));
   }
 
-  ~OpenReadableFile() {}
-
+ public:
   std::unique_ptr<PlatformFile> fd{nullptr};
-
-#ifndef WIN32
- private:
-  DropPrivilegesRef dropper_{nullptr};
-#endif
 };
 
-Status readFile(
-    const fs::path& path,
-    size_t size,
-    size_t block_size,
-    bool dry_run,
-    bool preserve_time,
-    std::function<void(std::string& buffer, size_t size)> predicate,
-    bool blocking) {
+Status readFile(const fs::path& path,
+                size_t size,
+                size_t block_size,
+                bool dry_run,
+                bool preserve_time,
+                std::function<void(std::string& buffer, size_t size)> predicate,
+                bool blocking) {
   OpenReadableFile handle(path, blocking);
   if (handle.fd == nullptr || !handle.fd->isValid()) {
     return Status(1, "Cannot open file for reading: " + path.string());
   }
 
-  off_t file_size = handle.fd->size();
+  off_t file_size = static_cast<off_t>(handle.fd->size());
   if (handle.fd->isSpecialFile() && size > 0) {
     file_size = static_cast<off_t>(size);
   }
 
   // Apply the max byte-read based on file/link target ownership.
-  off_t read_max = (handle.fd->isOwnerRoot().ok())
-                       ? FLAGS_read_max
-                       : std::min(FLAGS_read_max, FLAGS_read_user_max);
+  off_t read_max =
+      static_cast<off_t>((handle.fd->isOwnerRoot().ok())
+                             ? FLAGS_read_max
+                             : std::min(FLAGS_read_max, FLAGS_read_user_max));
   if (file_size > read_max) {
     VLOG(1) << "Cannot read " << path << " size exceeds limit: " << file_size
             << " > " << read_max;
@@ -141,24 +128,36 @@ Status readFile(
   PlatformTime times;
   handle.fd->getFileTimes(times);
 
-  if (file_size == 0) {
-    off_t total_bytes = 0;
+  off_t total_bytes = 0;
+  if (file_size == 0 || block_size > 0) {
+    // Reset block size to a sane minimum.
+    block_size = (block_size < 4096) ? 4096 : block_size;
     ssize_t part_bytes = 0;
+    bool overflow = false;
     do {
-      auto part = std::string(4096, '\0');
+      std::string part(block_size, '\0');
       part_bytes = handle.fd->read(&part[0], block_size);
       if (part_bytes > 0) {
-        total_bytes += part_bytes;
+        total_bytes += static_cast<off_t>(part_bytes);
         if (total_bytes >= read_max) {
           return Status(1, "File exceeds read limits");
         }
-        //        content += part.substr(0, part_bytes);
+        if (file_size > 0 && total_bytes > file_size) {
+          overflow = true;
+          part_bytes -= (total_bytes - file_size);
+        }
         predicate(part, part_bytes);
       }
-    } while (part_bytes > 0);
+    } while (part_bytes > 0 && !overflow);
   } else {
-    auto content = std::string(file_size, '\0');
-    handle.fd->read(&content[0], file_size);
+    std::string content(file_size, '\0');
+    do {
+      auto part_bytes =
+          handle.fd->read(&content[total_bytes], file_size - total_bytes);
+      if (part_bytes > 0) {
+        total_bytes += static_cast<off_t>(part_bytes);
+      }
+    } while (handle.fd->hasPendingIo());
     predicate(content, file_size);
   }
 
@@ -180,11 +179,11 @@ Status readFile(const fs::path& path,
                   4096,
                   dry_run,
                   preserve_time,
-                  ([&content](std::string& buffer, size_t size) {
-                    if (buffer.size() == size) {
+                  ([&content](std::string& buffer, size_t _size) {
+                    if (buffer.size() == _size) {
                       content += std::move(buffer);
                     } else {
-                      content += buffer.substr(0, size);
+                      content += buffer.substr(0, _size);
                     }
                   }),
                   blocking);
@@ -195,7 +194,9 @@ Status readFile(const fs::path& path, bool blocking) {
   return readFile(path, blank, 0, true, false, blocking);
 }
 
-Status forensicReadFile(const fs::path& path, std::string& content, bool blocking) {
+Status forensicReadFile(const fs::path& path,
+                        std::string& content,
+                        bool blocking) {
   return readFile(path, content, 0, false, true, blocking);
 }
 
@@ -269,15 +270,15 @@ static void genGlobs(std::string path,
   }
 
   // Prune results based on settings/requested glob limitations.
-  auto end = std::remove_if(results.begin(), results.end(),
-                            [limits](const std::string& found) {
-                              return !(((found[found.length() - 1] == '/' ||
-                                         found[found.length() - 1] == '\\') &&
-                                        limits & GLOB_FOLDERS) ||
-                                       ((found[found.length() - 1] != '/' &&
-                                         found[found.length() - 1] != '\\') &&
-                                        limits & GLOB_FILES));
-                            });
+  auto end = std::remove_if(
+      results.begin(), results.end(), [limits](const std::string& found) {
+        return !(((found[found.length() - 1] == '/' ||
+                   found[found.length() - 1] == '\\') &&
+                  limits & GLOB_FOLDERS) ||
+                 ((found[found.length() - 1] != '/' &&
+                   found[found.length() - 1] != '\\') &&
+                  limits & GLOB_FILES));
+      });
   results.erase(end, results.end());
 }
 
@@ -350,15 +351,15 @@ inline Status listInAbsoluteDirectory(const fs::path& path,
 Status listFilesInDirectory(const fs::path& path,
                             std::vector<std::string>& results,
                             bool recursive) {
-  return listInAbsoluteDirectory((path / ((recursive) ? "**" : "*")), results,
-                                 GLOB_FILES);
+  return listInAbsoluteDirectory(
+      (path / ((recursive) ? "**" : "*")), results, GLOB_FILES);
 }
 
 Status listDirectoriesInDirectory(const fs::path& path,
                                   std::vector<std::string>& results,
                                   bool recursive) {
-  return listInAbsoluteDirectory((path / ((recursive) ? "**" : "*")), results,
-                                 GLOB_FOLDERS);
+  return listInAbsoluteDirectory(
+      (path / ((recursive) ? "**" : "*")), results, GLOB_FOLDERS);
 }
 
 Status isDirectory(const fs::path& path) {
@@ -429,7 +430,7 @@ bool safePermissions(const std::string& dir,
     result = fd.isExecutable();
 
     // Otherwise, require matching or root file ownership.
-    if (executable && (result.getCode() > 0 || !fd.isNonWritable().ok())) {
+    if (executable && (result.getCode() > 0 || !fd.hasSafePermissions().ok())) {
       // Require executable, implies by the owner.
       return false;
     }
@@ -446,19 +447,22 @@ const std::string& osqueryHomeDirectory() {
 
   if (homedir.size() == 0) {
     // Try to get the caller's home directory
+    boost::system::error_code ec;
     auto userdir = getHomeDirectory();
     if (userdir.is_initialized() && isWritable(*userdir).ok()) {
       auto osquery_dir = (fs::path(*userdir) / ".osquery");
-      if (isWritable(osquery_dir)) {
+      if (isWritable(osquery_dir) ||
+          boost::filesystem::create_directories(osquery_dir, ec)) {
         homedir = osquery_dir.make_preferred().string();
         return homedir;
       }
     }
 
     // Fail over to a temporary directory (used for the shell).
-    boost::system::error_code ec;
     auto temp =
-        fs::temp_directory_path(ec) / fs::unique_path("osquery%%%%%%%%", ec);
+        fs::temp_directory_path(ec) /
+        (std::string("osquery-") + std::to_string((rand() % 10000) + 20000));
+    boost::filesystem::create_directories(temp, ec);
     homedir = temp.make_preferred().string();
   }
 
@@ -491,7 +495,7 @@ Status parseJSONContent(const std::string& content, pt::ptree& tree) {
     std::stringstream json_stream;
     json_stream << content;
     pt::read_json(json_stream, tree);
-  } catch (const pt::json_parser::json_parser_error& e) {
+  } catch (const pt::json_parser::json_parser_error& /* e */) {
     return Status(1, "Could not parse JSON from file");
   }
   return Status(0, "OK");

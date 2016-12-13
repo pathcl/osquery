@@ -10,34 +10,28 @@
 
 #include <gtest/gtest.h>
 
+#include <osquery/core.h>
 #include <osquery/logger.h>
-#include <osquery/tables.h>
 #include <osquery/sql.h>
+#include <osquery/tables.h>
 
+#include "osquery/core/conversions.h"
 #include "osquery/tests/test_util.h"
 
 namespace osquery {
 namespace tables {
 
-QueryData genOSVersion(QueryContext& context);
-
 class SystemsTablesTests : public testing::Test {};
 
 TEST_F(SystemsTablesTests, test_os_version) {
-  QueryContext context;
-  auto result = genOSVersion(context);
-  EXPECT_EQ(result.size(), 1U);
+  auto results = SQL("select * from os_version");
 
-  // Make sure major and minor contain data (a missing value of -1 is an error).
-  EXPECT_FALSE(result[0]["major"].empty());
+  EXPECT_EQ(results.rows().size(), 1U);
 
-// Debian does not define a minor.
-#if !defined(DEBIAN)
-  EXPECT_FALSE(result[0]["minor"].empty());
-#endif
-
+  // Make sure major and minor have data (a missing value of -1 is an error).
+  EXPECT_FALSE(results.rows()[0].at("major").empty());
   // The OS name should be filled in too.
-  EXPECT_FALSE(result[0]["name"].empty());
+  EXPECT_FALSE(results.rows()[0].at("name").empty());
 }
 
 TEST_F(SystemsTablesTests, test_process_info) {
@@ -46,7 +40,10 @@ TEST_F(SystemsTablesTests, test_process_info) {
 
   // Make sure there is a valid UID and parent.
   EXPECT_EQ(results.rows()[0].count("uid"), 1U);
-  EXPECT_NE(results.rows()[0].at("uid"), "-1");
+  if (!isPlatform(PlatformType::TYPE_WINDOWS)) {
+    EXPECT_NE(results.rows()[0].at("uid"), "-1");
+  }
+
   EXPECT_NE(results.rows()[0].at("parent"), "-1");
 }
 
@@ -60,6 +57,35 @@ TEST_F(SystemsTablesTests, test_processes) {
   // Make sure an invalid pid within the query constraint returns no rows.
   results = SQL("select pid, name from processes where pid = -1");
   EXPECT_EQ(results.rows().size(), 0U);
+}
+
+TEST_F(SystemsTablesTests, test_processes_memory_cpu) {
+  auto results = SQL("select * from osquery_info join processes using (pid)");
+  long long bytes;
+  safeStrtoll(results.rows()[0].at("resident_size"), 0, bytes);
+
+  // Now we expect the running test to use over 1M of RSS.
+  bytes = bytes / (1024 * 1024);
+  EXPECT_GT(bytes, 1U);
+
+  safeStrtoll(results.rows()[0].at("total_size"), 0, bytes);
+  bytes = bytes / (1024 * 1024);
+  EXPECT_GT(bytes, 1U);
+
+  // Make sure user/system time are in seconds, pray we haven't actually used
+  // more than 100 seconds of CPU.
+  auto results2 = SQL("select * from osquery_info join processes using (pid)");
+
+  long long cpu_start, value;
+  safeStrtoll(results.rows()[0].at("user_time"), 0, cpu_start);
+  safeStrtoll(results2.rows()[0].at("user_time"), 0, value);
+  EXPECT_LT(value - cpu_start, 100U);
+  EXPECT_GE(value - cpu_start, 0U);
+
+  safeStrtoll(results.rows()[0].at("user_time"), 0, cpu_start);
+  safeStrtoll(results2.rows()[0].at("user_time"), 0, value);
+  EXPECT_LT(value - cpu_start, 100U);
+  EXPECT_GE(value - cpu_start, 0U);
 }
 
 TEST_F(SystemsTablesTests, test_abstract_joins) {
@@ -86,7 +112,8 @@ TEST_F(SystemsTablesTests, test_abstract_joins) {
 
   // Check LIKE and = operands.
   results =
-      SQL("select path from file where path = '/etc/' or path LIKE '/dev/%'");
+      SQL("select path from file where path = '/etc/' or path LIKE '/dev/%' or "
+          "path LIKE '\\Windows\\%';");
   ASSERT_GT(results.rows().size(), 1U);
 }
 }

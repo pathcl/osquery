@@ -13,15 +13,13 @@
 #include <osquery/logger.h>
 #include <osquery/system.h>
 
-#include "osquery/tests/test_util.h"
-#include "osquery/sql/sqlite_util.h"
 #include "osquery/dispatcher/scheduler.h"
+#include "osquery/sql/sqlite_util.h"
+#include "osquery/tests/test_util.h"
 
 namespace osquery {
 
 DECLARE_bool(disable_logging);
-
-extern SQL monitor(const std::string& name, const ScheduledQuery& query);
 
 class SchedulerTests : public testing::Test {
   void SetUp() override {
@@ -80,8 +78,8 @@ TEST_F(SchedulerTests, test_monitor) {
 TEST_F(SchedulerTests, test_config_results_purge) {
   // Set a query time for now (time is only important relative to a week ago).
   auto query_time = osquery::getUnixTime();
-  setDatabaseValue(kPersistentSettings, "timestamp.test_query",
-                   std::to_string(query_time));
+  setDatabaseValue(
+      kPersistentSettings, "timestamp.test_query", std::to_string(query_time));
   // Store a meaningless saved query interval splay.
   setDatabaseValue(kPersistentSettings, "interval.test_query", "11");
   // Store meaningless query differential results.
@@ -113,8 +111,8 @@ TEST_F(SchedulerTests, test_config_results_purge) {
 
   // Update the timestamp to have run a week and a day ago.
   query_time -= (84600 * (7 + 1));
-  setDatabaseValue(kPersistentSettings, "timestamp.test_query",
-                   std::to_string(query_time));
+  setDatabaseValue(
+      kPersistentSettings, "timestamp.test_query", std::to_string(query_time));
 
   // Trigger another purge.
   Config::getInstance().purge();
@@ -163,7 +161,7 @@ TEST_F(SchedulerTests, test_scheduler) {
   Config::getInstance().update({{"data", config}});
 
   // Run the scheduler for 1 second with a second interval.
-  SchedulerRunner runner(now + 1, 1);
+  SchedulerRunner runner(static_cast<unsigned long int>(now + 1), 1);
   runner.start();
 
   // If a query was executed the cache step will have been advanced.
